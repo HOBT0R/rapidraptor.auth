@@ -1,0 +1,40 @@
+{
+  "name": "@rapidraptor/auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Unified authentication library for session management and token expiration handling",
+  "workspaces": [
+    "packages/shared",
+    "packages/client",
+    "packages/server"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "build:shared": "npm run build --workspace=@rapidraptor/auth-shared",
+    "build:client": "npm run build --workspace=@rapidraptor/auth-client",
+    "build:server": "npm run build --workspace=@rapidraptor/auth-server",
+    "test": "npm run build:shared && vitest",
+    "test:watch": "npm run build:shared && vitest --watch",
+    "test:coverage": "npm run build:shared && vitest --coverage",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "clean": "npm run clean --workspaces && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/node": "^20.12.12",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^16.0.0",
+    "typescript": "^5.4.5",
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^1.6.1"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
+

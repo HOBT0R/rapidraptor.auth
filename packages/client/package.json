@@ -1,0 +1,35 @@
+{
+  "name": "@rapidraptor/auth-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Client-side authentication library for React applications",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "vitest"
+  },
+  "peerDependencies": {
+    "axios": "^1.0.0",
+    "firebase": "^11.0.0"
+  },
+  "optionalPeerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "dependencies": {
+    "@rapidraptor/auth-shared": "file:../shared"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.1"
+  }
+}
+

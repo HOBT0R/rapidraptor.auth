@@ -1,0 +1,248 @@
+# Coding Standards for @rapidraptor/auth Library
+
+## General Principles
+
+- **Consistency**: Maintain consistent code style across all packages (shared, client, server)
+- **Type Safety**: Use TypeScript strictly - avoid `any` types, prefer explicit types
+- **Clean Code**: Remove unused imports, variables, and dead code
+- **Documentation**: Add JSDoc comments for public APIs and complex logic
+
+## Code Formatting
+
+### Indentation
+- Use **2 spaces** for indentation (no tabs)
+- Indent continuation lines consistently
+- Align multi-line function parameters and object properties
+
+### Line Length
+- Prefer lines under 100 characters
+- Break long lines at logical points (after operators, before function calls)
+
+### Spacing
+- Use single spaces around operators: `const x = a + b`
+- No spaces inside parentheses: `if (condition)` not `if ( condition )`
+- Single space after commas: `function(a, b, c)`
+- Blank lines between logical sections of code
+
+## TypeScript Standards
+
+### Type Definitions
+- Always use explicit types for function parameters and return values
+- Prefer `interface` over `type` for object shapes
+- Use `type` for unions, intersections, and computed types
+- Avoid `any` - use `unknown` if type is truly unknown, then narrow it
+
+### Imports
+- **Remove unused imports** - always clean up imports that are no longer used
+- Group imports in this order (with blank lines between groups):
+  1. External dependencies (e.g., `import { Auth } from 'firebase/auth'`)
+  2. Internal package imports (e.g., `import { SessionInfo } from '@rapidraptor/auth-shared'`)
+  3. Relative imports (e.g., `import { SessionCache } from './sessionCache.js'`)
+  4. Type-only imports (e.g., `import type { Firestore } from 'firebase-admin/firestore'`)
+
+### Import Style
+- Use ES module syntax: `import` and `export`
+- Use `.js` extension in import paths for TypeScript files (required for ES modules)
+- Use `import type` for type-only imports to enable tree-shaking
+
+### Example Import Order:
+```typescript
+import { describe, it, expect, vi } from 'vitest';
+import type { Firestore } from 'firebase-admin/firestore';
+
+import { SessionService } from '@rapidraptor/auth-shared';
+import { ERROR_CODES } from '@rapidraptor/auth-shared';
+
+import { SessionCache } from './sessionCache.js';
+import type { SessionInfo } from './types.js';
+```
+
+## Naming Conventions
+
+### Files
+- **Components/Classes**: `PascalCase.ts` (e.g., `SessionService.ts`)
+- **Utilities/Functions**: `camelCase.ts` (e.g., `tokenManager.ts`)
+- **Types/Interfaces**: `camelCase.ts` (e.g., `types.ts`)
+- **Tests**: `*.test.ts` (e.g., `sessionService.test.ts`)
+
+### Variables and Functions
+- **Variables**: `camelCase` (e.g., `sessionService`, `userId`)
+- **Functions**: `camelCase` (e.g., `getToken()`, `updateLastActivity()`)
+- **Classes**: `PascalCase` (e.g., `SessionService`, `TokenManager`)
+- **Constants**: `UPPER_SNAKE_CASE` (e.g., `ERROR_CODES`, `DEFAULTS`)
+- **Private members**: Prefix with `private` keyword, use `camelCase` (e.g., `private cache: SessionCache`)
+
+### Types and Interfaces
+- **Interfaces**: `PascalCase` (e.g., `SessionInfo`, `ApiClientConfig`)
+- **Types**: `PascalCase` (e.g., `ErrorCode`, `UserTokenVerifier`)
+- **Generic types**: Single uppercase letter (e.g., `T`, `K`, `V`)
+
+## Code Organization
+
+### File Structure
+- Export public APIs in `index.ts` files
+- Keep implementation details in separate files
+- Group related functionality together
+
+### Function Organization
+- Place helper functions before main functions
+- Group related functions together
+- Export public functions, keep internal helpers private
+
+### Class Organization
+- Properties first (public, then private)
+- Constructor
+- Public methods
+- Private methods
+- Static methods last
+
+## Control Flow
+
+### Avoid Nested If Statements
+- **Prefer early returns** over nested if statements for better readability
+- Use guard clauses to handle error/invalid cases first
+- Structure code to flow linearly from top to bottom
+- If nesting is necessary, consider extracting logic into separate functions
+
+#### Good (Early Returns):
+```typescript
+async isSessionValid(userId: string): Promise<boolean> {
+  const cachedSession = this.cache.get(userId);
+  
+  // Step 1: Check for userId mismatch (data integrity issue)
+  if (cachedSession && cachedSession.userId !== userId) {
+    this.cache.clear(userId);
+    return false;
+  }
+  
+  // Step 2: Check if cached session is valid
+  if (cachedSession && !this.cache.isExpired(userId)) {
+    return true;
+  }
+  
+  // Step 3: Check Firestore
+  // ... rest of logic
+}
+```
+
+#### Bad (Nested If Statements):
+```typescript
+async isSessionValid(userId: string): Promise<boolean> {
+  const cachedSession = this.cache.get(userId);
+  if (cachedSession && !this.cache.isExpired(userId)) {
+    if (cachedSession.userId !== userId) {
+      this.cache.clear(userId);
+      return false;
+    }
+    return true;
+  }
+  // ... rest of logic
+}
+```
+
+## Error Handling
+
+- Use specific error types (e.g., `UserTokenVerificationError`)
+- Include meaningful error messages
+- Don't swallow errors - either handle them or re-throw with context
+- Use try-catch blocks for async operations that can fail
+
+## Testing Standards
+
+- Write tests for all public APIs
+- Use descriptive test names: `should [expected behavior] when [condition]`
+- Group related tests with `describe` blocks
+- Use `beforeEach`/`afterEach` for test setup/teardown
+- Mock external dependencies (Firebase, Firestore, etc.)
+- Test both success and error cases
+
+## Documentation
+
+### JSDoc Comments
+- Add JSDoc for all public functions, classes, and interfaces
+- Include parameter descriptions and return types
+- Document complex algorithms or business logic
+
+Example:
+```typescript
+/**
+ * Check session validity (cache-first lookup with Firestore fallback)
+ * @param userId - The user ID to check
+ * @returns Promise resolving to true if session is valid, false otherwise
+ */
+async isSessionValid(userId: string): Promise<boolean> {
+  // ...
+}
+```
+
+## Code Quality Checks
+
+Before committing code, ensure:
+- ✅ No unused imports
+- ✅ No unused variables (except those prefixed with `_`)
+- ✅ Consistent 2-space indentation
+- ✅ All TypeScript errors resolved
+- ✅ All tests pass
+- ✅ Code follows naming conventions
+- ✅ Imports are properly ordered and grouped
+
+## Monorepo-Specific Guidelines
+
+### Package Dependencies
+- Shared package has no external dependencies (pure TypeScript)
+- Client package depends on `@rapidraptor/auth-shared` and peer dependencies
+- Server package depends on `@rapidraptor/auth-shared` and `firebase-admin`
+
+### Cross-Package Imports
+- Always import from `@rapidraptor/auth-shared` for shared types/constants
+- Use relative imports within the same package
+- Never create circular dependencies between packages
+
+### Build Order
+- Shared package must be built before client/server packages
+- Use `npm run build:shared` before building other packages
+
+## Examples
+
+### Good Code Style:
+```typescript
+import type { SessionInfo } from '@rapidraptor/auth-shared';
+import { ERROR_CODES } from '@rapidraptor/auth-shared';
+
+import { SessionCache } from './sessionCache.js';
+
+export class SessionService {
+  private cache: SessionCache;
+  private inactivityTimeout: number;
+
+  constructor(cache: SessionCache, inactivityTimeout: number) {
+    this.cache = cache;
+    this.inactivityTimeout = inactivityTimeout;
+  }
+
+  async isSessionValid(userId: string): Promise<boolean> {
+    const session = this.cache.get(userId);
+    if (!session) {
+      return false;
+    }
+    return new Date() < session.expiresAt;
+  }
+}
+```
+
+### Bad Code Style:
+```typescript
+import {SessionInfo} from '@rapidraptor/auth-shared' // Missing space, wrong import order
+import { SessionCache } from './sessionCache.js'
+import { ERROR_CODES } from '@rapidraptor/auth-shared' // Should be grouped with other shared imports
+
+export class SessionService {
+private cache:SessionCache // Wrong indentation, missing space
+  async isSessionValid(userId: string): Promise<any> { // Using 'any' instead of boolean
+    const session=this.cache.get(userId) // Missing spaces
+    if(!session){return false} // Wrong formatting
+    return new Date()<session.expiresAt
+  }
+}
+```
+
