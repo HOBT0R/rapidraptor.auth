@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Check for skip release
+        id: skip-check
+        run: |
+          if echo "${{ github.event.head_commit.message }}" | grep -qE '\[skip release\]|\[no version\]'; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Skipping release due to [skip release] or [no version] in commit message"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Check if version tag exists
+        if: steps.skip-check.outputs.skip == 'false'
+        id: tag-check
+        run: |
+          # Get current version from package.json
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          TAG_NAME="v${CURRENT_VERSION}"
+          
+          # Check if tag already exists
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Tag $TAG_NAME already exists, skipping release"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Tag $TAG_NAME does not exist, proceeding with release"
+          fi
+      
+      - name: Setup Node.js
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+      
+      - name: Install dependencies
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        run: npm ci
+      
+      - name: Bump version
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        id: version
+        run: |
+          node scripts/auto-version.js
+          # Read new version from package.json
+          NEW_VERSION=$(node -p "require('./package.json').version")
+          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "version_tag=v${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "Bumped version to ${NEW_VERSION}"
+      
+      - name: Build packages
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        run: npm run build
+      
+      - name: Run smoke tests
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        run: |
+          npm run build:shared
+          npm test
+      
+      - name: Configure Git
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Commit version changes
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        run: |
+          git add package.json packages/*/package.json
+          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}"
+          git push origin main
+      
+      - name: Create and push tag
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        run: |
+          git tag ${{ steps.version.outputs.version_tag }}
+          git push origin ${{ steps.version.outputs.version_tag }}
+      
+      - name: Publish to npm
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false' && secrets.NPM_TOKEN != ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd packages/shared && npm publish --access public
+          cd ../client && npm publish --access public
+          cd ../server && npm publish --access public
+      
+      - name: Create GitHub Release
+        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version_tag }}
+          name: Release ${{ steps.version.outputs.version_tag }}
+          body: |
+            ## Changes in ${{ steps.version.outputs.version_tag }}
+            
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+          draft: false
+          prerelease: false
+

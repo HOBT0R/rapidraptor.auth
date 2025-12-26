@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+  pull_request:
+    branches: ['main']
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'CHANGELOG.md'
+      - 'docs/**'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Run ESLint
+        run: npm run lint
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build packages
+        run: npm run build
+
+  test:
+    name: Test (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Feature branches/PRs: Only Node 20 (faster)
+        # Main branch: Full matrix (18, 20, 22)
+        node-version: ${{ github.ref == 'refs/heads/main' && fromJSON('["18", "20", "22"]') || fromJSON('["20"]') }}
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build shared package
+        run: npm run build:shared
+      
+      - name: Run unit tests
+        run: npm test
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    # Only run integration tests when:
+    # - Pushing to main branch
+    # - PR targeting main (not draft)
+    if: |
+      (github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && 
+       github.event.pull_request.base.ref == 'main' && 
+       github.event.pull_request.draft == false)
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Install Firebase Tools
+        run: npm install -g firebase-tools
+      
+      - name: Build shared and server packages
+        run: |
+          npm run build:shared
+          npm run build:server
+      
+      - name: Start Firebase Emulator
+        run: |
+          firebase emulators:start --only auth,firestore --project test-project &
+          sleep 10
+        env:
+          FIREBASE_AUTH_EMULATOR_HOST: localhost:9099
+          FIRESTORE_EMULATOR_HOST: localhost:8080
+          FIREBASE_PROJECT_ID: test-project
+      
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          FIREBASE_AUTH_EMULATOR_HOST: localhost:9099
+          FIRESTORE_EMULATOR_HOST: localhost:8080
+          FIREBASE_PROJECT_ID: test-project
+      
+      - name: Stop Firebase Emulator
+        if: always()
+        run: pkill -f 'firebase.*emulators' || true
+
