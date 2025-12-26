@@ -17,7 +17,7 @@
     "test": "npm run build:shared && vitest",
     "test:watch": "npm run build:shared && vitest --watch",
     "test:coverage": "npm run build:shared && vitest --coverage",
-    "test:integration": "npm run build:shared && npm run build:server && vitest run __tests__/integration",
+    "test:integration": "npm run build:shared && npm run build:server && VITEST_INTEGRATION=true vitest run __tests__/integration",
     "test:integration:watch": "npm run build:shared && npm run build:server && vitest watch __tests__/integration",
     "emulator:start": "firebase emulators:start --only auth,firestore --project test-project",
     "emulator:stop": "pkill -f 'firebase.*emulators' || true",
