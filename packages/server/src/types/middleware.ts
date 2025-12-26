@@ -1,6 +1,10 @@
 /**
  * Interface for user token verifier
- * Matches the UserTokenVerifier from the proxy service
+ * Implementations should verify JWT tokens (signature, expiration, issuer, audience)
+ * and return the user information from the token payload.
+ * 
+ * This is a generic interface that can be implemented by any project using this library.
+ * The implementation is provided via dependency injection to createAuthMiddleware().
  */
 export interface UserTokenVerifier {
   verify(token: string, correlationId?: string): Promise<{ sub: string; email?: string; name?: string }>;
@@ -8,6 +12,7 @@ export interface UserTokenVerifier {
 
 /**
  * Interface for user token verification error
+ * Implementations should throw errors that match this interface
  */
 export interface UserTokenVerificationError extends Error {
   isExpired?: boolean;

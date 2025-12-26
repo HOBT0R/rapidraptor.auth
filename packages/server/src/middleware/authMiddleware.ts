@@ -1,9 +1,10 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import { decodeJwt } from 'jose';
 
-import { ERROR_CODES } from '@rapidraptor/auth-shared';
+import { ERROR_CODES, SessionValidationStatus } from '@rapidraptor/auth-shared';
 import type { ErrorResponse } from '@rapidraptor/auth-shared';
 
-import { SessionService } from '../session/sessionService.js';
+import { SessionService, TokenRevokedError } from '../session/sessionService.js';
 import type { UserTokenVerifier, UserTokenVerificationError, Logger } from '../types/middleware.js';
 
 /**
@@ -16,6 +17,34 @@ function isErrorWithCode(error: unknown): error is { code: string; message?: str
     'code' in error &&
     typeof (error as { code: unknown }).code === 'string'
   );
+}
+
+/**
+ * Handle token revocation error response
+ */
+function handleTokenRevoked(
+  res: Response,
+  requestLogger: Logger | undefined,
+  userId: string,
+  tokenIssuedAt: Date,
+  correlationId?: string,
+): void {
+  requestLogger?.warn?.('Token revoked (issued before logout)', {
+    event: 'token_revoked',
+    userId,
+    tokenIssuedAt: tokenIssuedAt.toISOString(),
+    correlationId,
+  });
+
+  res.status(401).json({
+    error: {
+      code: ERROR_CODES.SESSION_EXPIRED,
+      message: 'This token was issued before logout. Please log in again.',
+      requiresLogout: true,
+      sessionExpired: true,
+      timestamp: new Date().toISOString(),
+    },
+  } as ErrorResponse);
 }
 
 /**
@@ -49,6 +78,33 @@ export function createAuthMiddleware(
 
       const token = authHeader.split(' ')[1];
       let user: { sub: string; email?: string; name?: string };
+      let tokenIssuedAt: Date;
+
+      // Decode JWT to extract iat (issued at) timestamp
+      // This is needed to check if token was issued before logout
+      try {
+        const decoded = decodeJwt(token);
+        // iat is in seconds, convert to milliseconds for Date
+        tokenIssuedAt = new Date((decoded.iat || 0) * 1000);
+      } catch (error) {
+        // If we can't decode, assume token is invalid
+        requestLogger?.warn?.('Failed to decode JWT', {
+          event: 'jwt_decode_failed',
+          error: error instanceof Error ? error.message : 'Unknown error',
+          correlationId: req.correlationId,
+        });
+
+        res.status(401).json({
+          error: {
+            code: ERROR_CODES.AUTH_FAILED,
+            message: 'Invalid token format',
+            requiresLogout: false,
+            sessionExpired: false,
+            timestamp: new Date().toISOString(),
+          },
+        } as ErrorResponse);
+        return;
+      }
 
       try {
         // Type-safe access with Express type extensions
@@ -78,9 +134,9 @@ export function createAuthMiddleware(
       }
 
       // Phase 2: Session validation (new)
-      let isValid: boolean;
+      let validationStatus: SessionValidationStatus;
       try {
-        isValid = await sessionService.isSessionValid(user.sub);
+        validationStatus = await sessionService.validateSession(user.sub);
       } catch (error: unknown) {
         // Handle Firestore unavailability with proper type checking
         if (isErrorWithCode(error) && (error.code === 'unavailable' || error.code === 'deadline-exceeded')) {
@@ -106,7 +162,7 @@ export function createAuthMiddleware(
         throw error;
       }
 
-      if (isValid) {
+      if (validationStatus === SessionValidationStatus.VALID) {
         // Session is valid - update activity (async, don't wait)
         sessionService.updateLastActivity(user.sub).catch((err) => {
           requestLogger?.error?.('Failed to update activity', {
@@ -116,37 +172,81 @@ export function createAuthMiddleware(
             correlationId: req.correlationId,
           });
         });
-      } else {
-        // Session invalid - try to ensure session exists (idempotent, handles race conditions)
-        const wasCreated = await sessionService.ensureSession(user.sub);
+        // Continue to attach user and proceed
+      } else if (validationStatus === SessionValidationStatus.EXPIRED) {
+        // Session expired - reject the request
+        requestLogger?.warn?.('Session expired', {
+          event: 'session_expired',
+          userId: user.sub,
+          correlationId: req.correlationId,
+        });
 
-        // Step 1: Check if session was created
-        if (wasCreated) {
-          // Session was created, continue
+        res.status(401).json({
+          error: {
+            code: ERROR_CODES.SESSION_EXPIRED,
+            message: 'Session has expired due to inactivity',
+            requiresLogout: true,
+            sessionExpired: true,
+            timestamp: new Date().toISOString(),
+          },
+        } as ErrorResponse);
+        return;
+      } else if (validationStatus === SessionValidationStatus.NOT_FOUND) {
+        // Session doesn't exist - ensureSession will check token revocation and create session if needed
+        try {
+          await sessionService.ensureSession(user.sub, tokenIssuedAt);
           requestLogger?.info?.('Session created', {
             event: 'session_created',
             userId: user.sub,
             correlationId: req.correlationId,
           });
-        } else {
-          // Session exists but expired
-          requestLogger?.warn?.('Session expired', {
-            event: 'session_expired',
-            userId: user.sub,
-            correlationId: req.correlationId,
-          });
+        } catch (error: unknown) {
+          // Handle TokenRevokedError from ensureSession
+          if (error instanceof TokenRevokedError) {
+            handleTokenRevoked(res, requestLogger, user.sub, tokenIssuedAt, req.correlationId);
+            return;
+          }
+          // Handle Firestore unavailability (from validateSession or createSession)
+          if (isErrorWithCode(error) && (error.code === 'unavailable' || error.code === 'deadline-exceeded')) {
+            requestLogger?.error?.('Firestore unavailable for session creation', {
+              event: 'firestore_unavailable',
+              error: error.message || 'Unknown error',
+              userId: user.sub,
+              correlationId: req.correlationId,
+            });
 
-          res.status(401).json({
-            error: {
-              code: ERROR_CODES.SESSION_EXPIRED,
-              message: 'Session has expired due to inactivity',
-              requiresLogout: true,
-              sessionExpired: true,
-              timestamp: new Date().toISOString(),
-            },
-          } as ErrorResponse);
-          return;
+            res.status(503).json({
+              error: {
+                code: ERROR_CODES.SERVICE_UNAVAILABLE,
+                message: 'User sessions could not be created',
+                requiresLogout: false,
+                sessionExpired: false,
+                timestamp: new Date().toISOString(),
+              },
+            } as ErrorResponse);
+            return;
+          }
+          // Re-throw other errors
+          throw error;
         }
+      } else if (validationStatus === SessionValidationStatus.DATA_INTEGRITY_ERROR) {
+        // Data integrity issue - reject request
+        requestLogger?.error?.('Session data integrity error', {
+          event: 'session_data_integrity_error',
+          userId: user.sub,
+          correlationId: req.correlationId,
+        });
+
+        res.status(500).json({
+          error: {
+            code: ERROR_CODES.INTERNAL_ERROR,
+            message: 'Session data integrity error',
+            requiresLogout: true,
+            sessionExpired: false,
+            timestamp: new Date().toISOString(),
+          },
+        } as ErrorResponse);
+        return;
       }
 
       // Attach user to request - now type-safe
@@ -165,4 +265,3 @@ export function createAuthMiddleware(
     }
   };
 }
-

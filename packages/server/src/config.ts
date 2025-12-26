@@ -37,14 +37,26 @@ export function createSessionService(
   firestore: Firestore,
   config?: Partial<SessionServiceConfig>,
 ): SessionService {
-  const inactivityTimeout = config?.inactivityTimeoutMs ?? DEFAULTS.INACTIVITY_TIMEOUT_MS;
-  const throttleMs = config?.firestoreWriteThrottleMs ?? DEFAULTS.FIRESTORE_WRITE_THROTTLE_MS;
-  const collectionName = config?.firestoreCollectionName ?? DEFAULTS.FIRESTORE_COLLECTION_NAME;
-
-  const cache = new SessionCache(inactivityTimeout);
-  const firestoreSync = new FirestoreSync(firestore, throttleMs, collectionName);
-  const sessionService = new SessionService(cache, firestoreSync, firestore, inactivityTimeout, collectionName);
+  const inactivityTimeout     = config?.inactivityTimeoutMs ?? DEFAULTS.INACTIVITY_TIMEOUT_MS;
+  const throttleMs            = config?.firestoreWriteThrottleMs ?? DEFAULTS.FIRESTORE_WRITE_THROTTLE_MS;
+  const usersCollectionName   = config?.firestoreCollectionName ?? DEFAULTS.FIRESTORE_SESSIONS_COLLECTION_NAME;
+  const logoutsCollectionName = config?.firestoreLogoutsCollectionName ?? DEFAULTS.FIRESTORE_LOGOUTS_COLLECTION_NAME;
+  const logoutTtlMs           = config?.logoutTtlMs ?? DEFAULTS.LOGOUT_TTL_MS;
+  const cache                 = new SessionCache(inactivityTimeout);
+  const firestoreSync         = new FirestoreSync(firestore, throttleMs, usersCollectionName);
+  const sessionService        = new SessionService(
+    cache,
+    firestoreSync,
+    firestore,
+    inactivityTimeout,
+    usersCollectionName,
+    logoutsCollectionName,
+    logoutTtlMs,
+  );
 
   return sessionService;
 }
+
+
+
 

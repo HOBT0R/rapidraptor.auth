@@ -90,8 +90,8 @@ import {
   createSessionService,
   initializeFirebaseAdmin,
   getFirestoreInstance,
+  JoseTokenVerifier,
 } from '@rapidraptor/auth/server';
-import { UserTokenVerifier } from './auth/user-token-verifier';
 
 // Initialize Firebase Admin
 await initializeFirebaseAdmin();
@@ -100,9 +100,16 @@ const firestore = getFirestoreInstance();
 // Create SessionService with defaults
 const sessionService = createSessionService(firestore);
 
+// Create token verifier (default implementation)
+const tokenVerifier = new JoseTokenVerifier({
+  jwksUri: 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
+  issuer: 'https://securetoken.google.com/YOUR_PROJECT_ID',
+  audience: 'YOUR_PROJECT_ID',
+});
+
 // Create middleware
 const authMiddleware = createAuthMiddleware(
-  userTokenVerifier,
+  tokenVerifier,
   sessionService,
   logger
 );
@@ -184,7 +191,7 @@ const throttleMs = parseInt(
   10,
 );
 const collectionName =
-  process.env.FIRESTORE_SESSIONS_COLLECTION || DEFAULTS.FIRESTORE_COLLECTION_NAME;
+  process.env.FIRESTORE_SESSIONS_COLLECTION || DEFAULTS.FIRESTORE_SESSIONS_COLLECTION_NAME;
 
 // Create components
 const cache = new SessionCache(inactivityTimeout);
@@ -209,7 +216,7 @@ import { DEFAULTS } from '@rapidraptor/auth-shared';
 
 // DEFAULTS.INACTIVITY_TIMEOUT_MS = 24 * 60 * 60 * 1000 (24 hours)
 // DEFAULTS.FIRESTORE_WRITE_THROTTLE_MS = 5 * 60 * 1000 (5 minutes)
-// DEFAULTS.FIRESTORE_COLLECTION_NAME = 'user_sessions'
+// DEFAULTS.FIRESTORE_SESSIONS_COLLECTION_NAME = 'user_sessions'
 // DEFAULTS.MAX_RETRIES = 1
 // DEFAULTS.API_TIMEOUT_MS = 30 * 1000 (30 seconds)
 ```
@@ -228,7 +235,49 @@ import { DEFAULTS } from '@rapidraptor/auth-shared';
 
 - `inactivityTimeoutMs` (optional): Session inactivity timeout in milliseconds (default: `DEFAULTS.INACTIVITY_TIMEOUT_MS`)
 - `firestoreWriteThrottleMs` (optional): Throttle period for Firestore writes in milliseconds (default: `DEFAULTS.FIRESTORE_WRITE_THROTTLE_MS`)
-- `firestoreCollectionName` (optional): Firestore collection name for sessions (default: `DEFAULTS.FIRESTORE_COLLECTION_NAME`)
+- `firestoreCollectionName` (optional): Firestore collection name for sessions (default: `DEFAULTS.FIRESTORE_SESSIONS_COLLECTION_NAME`)
+
+#### Token Verifier Configuration (`TokenVerifierConfig`)
+
+The default `JoseTokenVerifier` supports multiple configuration options:
+
+```typescript
+import { JoseTokenVerifier } from '@rapidraptor/auth/server';
+
+// Option 1: JWKS URI (recommended for OAuth providers like Firebase, Auth0)
+const verifier = new JoseTokenVerifier({
+  jwksUri: 'https://www.googleapis.com/service_accounts/v1/jwk/...',
+  issuer: 'https://securetoken.google.com/YOUR_PROJECT_ID',
+  audience: 'YOUR_PROJECT_ID',
+});
+
+// Option 2: Static public key (for custom JWT issuers)
+const verifier = new JoseTokenVerifier({
+  publicKey: '-----BEGIN PUBLIC KEY-----\n...', // Inline PEM
+  // OR
+  publicKey: 'file:///path/to/public-key.pem', // File path
+  issuer: 'https://your-issuer.com',
+  audience: 'your-audience',
+});
+
+// Option 3: Skip verification (development/test only)
+const verifier = new JoseTokenVerifier({
+  skipVerification: true,
+  mockUser: {
+    sub: 'dev-user',
+    email: 'dev@example.com',
+    name: 'Development User',
+  },
+});
+```
+
+**Configuration Options:**
+- `skipVerification` (optional): Skip verification and return mock user (default: `false`)
+- `publicKey` (optional): Static public key in PEM format or file path (prefix with `file://`)
+- `jwksUri` (optional): JWKS URI for remote key lookup
+- `issuer` (optional): Expected JWT issuer (iss claim)
+- `audience` (optional): Expected JWT audience (aud claim)
+- `mockUser` (optional): Mock user to return when `skipVerification` is true
 
 ### Environment Variable Example
 
@@ -257,6 +306,49 @@ const sessionService = createSessionService(firestore, {
 ## Documentation
 
 See the [Solution Design](./solution-design-session-management.md) and [Technical Design](./technical-design-session-management.md) documents for detailed architecture and implementation details.
+
+## Release Process
+
+This library uses automated versioning and releases. When a PR is merged to the `main` branch:
+
+1. **CI checks run** - All tests (unit + integration) must pass
+2. **Version bump** - Patch version is automatically incremented (e.g., 0.1.0 → 0.1.1)
+3. **Git tag** - A version tag is created and pushed (e.g., `v0.1.1`)
+4. **npm publish** - All packages are published to npm (optional, requires NPM_TOKEN secret)
+5. **GitHub release** - A GitHub release is created with changelog
+
+**Note**: npm publishing is optional. If `NPM_TOKEN` is not configured, the workflow will skip npm publishing and only create git tags and GitHub releases.
+
+### Manual Version Bumps
+
+For major or minor version bumps:
+
+```bash
+# Bump minor version
+npm run version:bump minor
+
+# Bump major version
+npm run version:bump major
+
+# Set specific version
+npm run version:bump 1.2.3
+```
+
+Then commit and push the changes. The automated release workflow will handle the rest.
+
+### Skipping a Release
+
+To skip versioning for a merge, include `[skip release]` or `[no version]` in the commit message.
+
+### Version Management
+
+All packages share the same version number for simplicity. To verify versions are synchronized:
+
+```bash
+npm run version:check
+```
+
+See [CHANGELOG.md](./CHANGELOG.md) for a list of all releases and changes.
 
 ## License
 

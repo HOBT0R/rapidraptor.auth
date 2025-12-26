@@ -5,15 +5,13 @@
 export class RequestQueue {
   private queuedRequests: Array<{
     resolve: (token: string) => void;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    reject: (error: any) => void;
+    reject: (error: unknown) => void;
   }> = [];
 
   /**
    * Queue a request to wait for token refresh
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  queue(resolve: (token: string) => void, reject: (error: any) => void): void {
+  queue(resolve: (token: string) => void, reject: (error: unknown) => void): void {
     this.queuedRequests.push({ resolve, reject });
   }
 
@@ -29,8 +27,7 @@ export class RequestQueue {
   /**
    * Reject all queued requests (on refresh failure)
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async rejectAll(error: any): Promise<void> {
+  async rejectAll(error: unknown): Promise<void> {
     const requests = [...this.queuedRequests];
     this.queuedRequests = [];
     requests.forEach(({ reject }) => reject(error));

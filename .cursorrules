@@ -147,6 +147,61 @@ async isSessionValid(userId: string): Promise<boolean> {
 - Don't swallow errors - either handle them or re-throw with context
 - Use try-catch blocks for async operations that can fail
 
+## Avoiding Boolean Blindness
+
+### When to Use Status Enums Instead of Booleans
+
+If a boolean return value doesn't provide enough information for the caller to make decisions, use a status enum instead.
+
+**Use a boolean when:**
+- The caller only needs to know success/failure
+- No additional context is needed
+- Example: `isAuthenticated()`, `hasPermission()`
+
+**Use a status enum when:**
+- The caller needs to know WHY something failed
+- Different failure reasons require different handling
+- You're making extra calls to reconstruct the reason
+- Example: `validateSession()` returns `SessionValidationStatus`
+
+**Pattern:**
+```typescript
+// ❌ Boolean blindness - requires extra calls
+async isSessionValid(): Promise<boolean> { ... }
+// Then caller must call sessionExists() to know why
+
+// ✅ Status enum - provides all needed information
+async validateSession(): Promise<SessionValidationStatus> { ... }
+// Caller knows exactly why it's invalid
+```
+
+**Benefits:**
+- Type-safe with exhaustiveness checking
+- Self-documenting code
+- More efficient (fewer calls)
+- Easier to test and maintain
+
+**Example Implementation:**
+```typescript
+enum SessionValidationStatus {
+  VALID = 'VALID',
+  NOT_FOUND = 'NOT_FOUND',
+  EXPIRED = 'EXPIRED',
+  DATA_INTEGRITY_ERROR = 'DATA_INTEGRITY_ERROR',
+}
+
+async validateSession(userId: string): Promise<SessionValidationStatus> {
+  // Implementation returns specific status
+  if (!doc.exists) {
+    return SessionValidationStatus.NOT_FOUND;
+  }
+  if (new Date() > session.expiresAt) {
+    return SessionValidationStatus.EXPIRED;
+  }
+  return SessionValidationStatus.VALID;
+}
+```
+
 ## Testing Standards
 
 - Write tests for all public APIs

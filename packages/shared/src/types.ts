@@ -11,6 +11,18 @@ export interface SessionInfo {
 }
 
 /**
+ * Session validation status
+ * Used to avoid boolean blindness when checking session validity
+ * Provides explicit information about why a session is invalid
+ */
+export enum SessionValidationStatus {
+  VALID = 'VALID',
+  NOT_FOUND = 'NOT_FOUND',
+  EXPIRED = 'EXPIRED',
+  DATA_INTEGRITY_ERROR = 'DATA_INTEGRITY_ERROR',
+}
+
+/**
  * Error codes returned by the authentication system
  * Type derived from ERROR_CODES in constants.ts (single source of truth)
  * This extracts the union of all values from the ERROR_CODES object
@@ -55,6 +67,7 @@ export interface ApiClientConfig {
   onLogout?: () => void | Promise<void>;
   maxRetries?: number;
   timeout?: number;
+  logoutEndpoint?: string; // Default: '/auth/logout'
 }
 
 /**
@@ -64,6 +77,8 @@ export interface SessionServiceConfig {
   inactivityTimeoutMs: number;
   firestoreWriteThrottleMs: number;
   firestoreCollectionName?: string;
+  firestoreLogoutsCollectionName?: string; // Default: 'user_logouts'
+  logoutTtlMs?: number; // Default: 1 hour
 }
 
 /**
@@ -81,6 +96,15 @@ export interface FirestoreSessionDocument {
   userId: string;
   createdAt: FirestoreTimestamp | Date; // Firestore Timestamp or Date (Date when writing, Timestamp when reading)
   lastActivityAt: FirestoreTimestamp | Date;
+  expiresAt: FirestoreTimestamp | Date;
+}
+
+/**
+ * Firestore document structure for logout records
+ */
+export interface FirestoreLogoutDocument {
+  userId: string;
+  loggedOutAt: FirestoreTimestamp | Date; // Firestore Timestamp or Date (Date when writing, Timestamp when reading)
   expiresAt: FirestoreTimestamp | Date;
 }
 

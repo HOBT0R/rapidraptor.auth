@@ -1,9 +1,14 @@
 ---
 title: Technical Design - Session Management and Token Expiration
-version: 1.0
+version: 1.2
 status: Draft
-date: 2024
+date: 2025-12-26
 ---
+
+**Version History:**
+- **v1.2**: Added JWT revocation tracking to prevent re-authentication after logout
+- **v1.1**: Added logout handler and client-side logout method implementation
+- **v1.0**: Initial technical design for session management and token expiration
 
 # Technical Design: Session Management and Token Expiration
 
@@ -268,7 +273,8 @@ rapidraptor-auth/
 │   │   │   ├── firebase/
 │   │   │   │   └── admin.ts            # Firebase Admin SDK initialization
 │   │   │   ├── middleware/
-│   │   │   │   └── authMiddleware.ts   # Express middleware factory
+│   │   │   │   ├── authMiddleware.ts   # Express middleware factory
+│   │   │   │   └── logoutHandler.ts    # Logout handler factory
 │   │   │   └── index.ts                 # Public API exports
 │   │   ├── package.json
 │   │   └── tsconfig.json
@@ -667,59 +673,6 @@ class SessionService {
     return true;
   }
 
-  // NEW CODE: Check if session exists in Firestore (regardless of expiration)
-  async sessionExists(userId: string): Promise<boolean> {
-    // FIREBASE SDK: Check if document exists
-    const docRef = this.firestore.collection('user_sessions').doc(userId);
-    const doc = await docRef.get();
-    return doc.exists;
-  }
-
-  // NEW CODE: Ensure session exists (idempotent - creates if doesn't exist)
-  // Returns true if session was created, false if it already existed
-  async ensureSession(userId: string): Promise<boolean> {
-    // NEW CODE: Use Firestore transaction to prevent race conditions
-    const docRef = this.firestore.collection('user_sessions').doc(userId);
-    
-    return await this.firestore.runTransaction(async (transaction) => {
-      const doc = await transaction.get(docRef);
-      
-      if (doc.exists) {
-        // Session exists - check if expired
-        const data = doc.data() as SessionInfo;
-        const expiresAt = data.expiresAt.toDate();
-        if (new Date() > expiresAt) {
-          // Session expired
-          return false;
-        }
-        // Session exists and is valid
-        return false;
-      }
-      
-      // NEW CODE: Create new session
-      const now = new Date();
-      const session: SessionInfo = {
-        userId,
-        createdAt: now,
-        lastActivityAt: now,
-        expiresAt: new Date(now.getTime() + this.inactivityTimeout)
-      };
-      
-      // FIREBASE SDK: Create session in transaction
-      transaction.set(docRef, {
-        userId: session.userId,
-        createdAt: session.createdAt,
-        lastActivityAt: session.lastActivityAt,
-        expiresAt: session.expiresAt
-      });
-      
-      // NEW CODE: Update cache
-      this.cache.set(userId, session);
-      
-      return true; // Session was created
-    });
-  }
-
   // NEW CODE: Create new session
   async createSession(userId: string): Promise<void> {
     const now = new Date();
@@ -746,10 +699,6 @@ class SessionService {
   }
 
   // NEW CODE: Update last activity
-  // Note: Cache is updated immediately for fast reads, but Firestore write
-  // is throttled (5 min). This means cache may be ahead of Firestore, which
-  // is acceptable since cache is the source of truth for active requests.
-  // On cache miss, Firestore is checked and cache is updated.
   async updateLastActivity(userId: string): Promise<void> {
     const session = this.cache.get(userId);
     if (!session) {
@@ -759,7 +708,7 @@ class SessionService {
       // Session now in cache after isSessionValid call
     }
 
-    // NEW CODE: Update cache immediately (fast path)
+    // NEW CODE: Update cache immediately
     const updatedSession: SessionInfo = {
       ...this.cache.get(userId)!,
       lastActivityAt: new Date(),
@@ -767,8 +716,7 @@ class SessionService {
     };
     this.cache.set(userId, updatedSession);
 
-    // NEW CODE: Queue Firestore write (throttled - may not write immediately)
-    // This is acceptable because cache is authoritative for active sessions
+    // NEW CODE: Queue Firestore write (throttled)
     this.firestoreSync.queueWrite(userId, updatedSession);
   }
 
@@ -777,21 +725,58 @@ class SessionService {
     // NEW CODE: Clear cache
     this.cache.clear(userId);
 
-    // FIREBASE SDK: Delete from Firestore
+    // NEW CODE: Store logout timestamp to prevent re-authentication with old JWTs
+    // This addresses the JWT limitation: JWTs cannot be revoked, but we can track
+    // when a user logged out and reject tokens issued before that time
+    const logoutRef = this.firestore
+      .collection('user_logouts')
+      .doc(userId);
+    
+    // FIREBASE SDK: Store logout timestamp (expires after 1 hour, matching typical JWT lifetime)
+    await logoutRef.set({
+      userId,
+      loggedOutAt: new Date(),
+      expiresAt: new Date(Date.now() + 3600000), // 1 hour TTL
+    });
+
+    // FIREBASE SDK: Delete session document from Firestore
     const docRef = this.firestore.collection('user_sessions').doc(userId);
     await docRef.delete();
   }
 
+  // NEW CODE: Check if JWT token was issued before logout
+  async isTokenRevoked(userId: string, tokenIssuedAt: Date): Promise<boolean> {
+    // FIREBASE SDK: Check logout timestamp
+    const logoutRef = this.firestore
+      .collection('user_logouts')
+      .doc(userId);
+    const doc = await logoutRef.get();
+    
+    if (!doc.exists) {
+      return false; // No logout recorded - token is valid
+    }
+    
+    const data = doc.data();
+    if (!data) {
+      return false;
+    }
+    
+    // NEW CODE: Check if logout record is still valid (within 1 hour)
+    const expiresAt = data.expiresAt?.toDate ? data.expiresAt.toDate() : new Date(data.expiresAt);
+    if (new Date() >= expiresAt) {
+      return false; // Logout record expired - token is valid
+    }
+    
+    // NEW CODE: Check if token was issued BEFORE logout
+    const loggedOutAt = data.loggedOutAt?.toDate ? data.loggedOutAt.toDate() : new Date(data.loggedOutAt);
+    return tokenIssuedAt < loggedOutAt;
+  }
+
   // NEW CODE: Warmup cache from Firestore
-  // Note: For large user bases (>10,000 active sessions), consider pagination
-  // or lazy loading. Current implementation loads all active sessions.
   async warmupCache(): Promise<void> {
     // FIREBASE SDK: Query active sessions
     const collection = this.firestore.collection('user_sessions');
     const now = new Date();
-    
-    // NEW CODE: Paginate if needed (for very large user bases)
-    // For now, load all active sessions (acceptable for <10K users)
     const snapshot = await collection
       .where('expiresAt', '>', now)
       .get();
@@ -816,8 +801,6 @@ class SessionService {
 - ✅ NEW CODE: Cache-first lookup logic
 - ✅ NEW CODE: Session expiration calculation
 - ✅ NEW CODE: Activity tracking logic
-- ✅ NEW CODE: `sessionExists()` method to check Firestore without expiration check
-- ✅ NEW CODE: `ensureSession()` method with Firestore transaction (prevents race conditions)
 
 ---
 
@@ -830,6 +813,7 @@ class SessionService {
 ```typescript
 // NEW CODE: Auth middleware with session validation
 import { RequestHandler } from 'express';
+import { decodeJwt } from 'jose'; // For extracting iat from JWT
 import { SessionService } from '../session/sessionService';
 // Uses existing JWT verifier (not shown, but uses Firebase Admin SDK)
 
@@ -847,50 +831,56 @@ export function createAuthMiddleware(
       }
 
       const token = authHeader.split(' ')[1];
+      
+      // NEW CODE: Decode JWT to extract iat (issued at) timestamp
+      // This is needed to check if token was issued before logout
+      let tokenIssuedAt: Date;
+      try {
+        // Decode JWT payload to get iat (issued at time in seconds)
+        const decoded = jose.decodeJwt(token);
+        tokenIssuedAt = new Date((decoded.iat || 0) * 1000); // Convert seconds to milliseconds
+      } catch (error) {
+        // If we can't decode, assume token is invalid
+        throw new AuthenticationError('Invalid token format');
+      }
+      
       // EXISTING CODE: Verify JWT (uses Firebase Admin SDK)
       const user = await userTokenVerifier.verify(token);
 
-      // NEW CODE: Check session validity with Firestore error handling
-      let isValid: boolean;
-      try {
-        isValid = await sessionService.isSessionValid(user.sub);
-      } catch (error: any) {
-        // NEW CODE: Handle Firestore unavailability
-        if (error.code === 'unavailable' || error.code === 'deadline-exceeded') {
-          logger?.error('Firestore unavailable for session validation', {
-            error: error.message,
-            userId: user.sub
-          });
-          return res.status(503).json({
+      // NEW CODE: Check session validity
+      const isValid = await sessionService.isSessionValid(user.sub);
+
+      if (!isValid) {
+        // NEW CODE: Check if token was issued before logout
+        const isRevoked = await sessionService.isTokenRevoked(user.sub, tokenIssuedAt);
+        if (isRevoked) {
+          // NEW CODE: Token was issued before logout - reject request
+          return res.status(401).json({
             error: {
-              code: 'SERVICE_UNAVAILABLE',
-              message: 'User sessions could not be validated',
-              requiresLogout: false,
-              sessionExpired: false,
-              timestamp: new Date().toISOString()
+              code: 'SESSION_EXPIRED',
+              message: 'This token was issued before logout. Please log in again.',
+              requiresLogout: true,
+              sessionExpired: true
             }
           });
         }
-        throw error; // Re-throw other errors
-      }
 
-      if (!isValid) {
-        // NEW CODE: Try to ensure session exists (idempotent, handles race conditions)
-        const wasCreated = await sessionService.ensureSession(user.sub);
-        
-        if (!wasCreated) {
-          // Session exists but expired (ensureSession returns false for expired sessions)
+        // NEW CODE: Check if session exists (might need creation)
+        const sessionExists = await sessionService.sessionExists(user.sub);
+        if (!sessionExists) {
+          // NEW CODE: Create session on first request (token is valid - issued after logout or no logout recorded)
+          await sessionService.createSession(user.sub);
+        } else {
+          // NEW CODE: Session expired
           return res.status(401).json({
             error: {
               code: 'SESSION_EXPIRED',
               message: 'Session has expired due to inactivity',
               requiresLogout: true,
-              sessionExpired: true,
-              timestamp: new Date().toISOString()
+              sessionExpired: true
             }
           });
         }
-        // Session was created, continue
       } else {
         // NEW CODE: Update activity (async, don't wait)
         sessionService.updateLastActivity(user.sub).catch(err => {
@@ -907,10 +897,8 @@ export function createAuthMiddleware(
         return res.status(401).json({
           error: {
             code: error.isExpired ? 'TOKEN_EXPIRED' : 'AUTH_FAILED',
-            message: error.message,
             sessionExpired: false,
-            requiresLogout: error.isExpired,
-            timestamp: new Date().toISOString()
+            requiresLogout: error.isExpired
           }
         });
       }
@@ -922,11 +910,87 @@ export function createAuthMiddleware(
 
 **Key Points:**
 - ⚠️ Uses existing JWT verifier (which uses Firebase Admin SDK)
+- ✅ NEW CODE: JWT decoding to extract `iat` (issued at) timestamp
 - ✅ NEW CODE: Session validation logic
-- ✅ NEW CODE: Session creation on first request (using `ensureSession()` to prevent race conditions)
+- ✅ NEW CODE: Token revocation check (compare JWT `iat` with logout timestamp)
+- ✅ NEW CODE: Session creation on first request (only if token not revoked)
 - ✅ NEW CODE: Activity tracking
-- ✅ NEW CODE: Error response formatting with `sessionExpired` flag
-- ✅ NEW CODE: Firestore error handling (returns 503 on unavailability)
+- ✅ NEW CODE: Error response formatting
+
+---
+
+#### `packages/server/src/middleware/logoutHandler.ts`
+
+**Purpose:** Express middleware/handler for clearing sessions on logout
+
+**Firebase SDK Usage:** ❌ No direct Firebase SDK usage (uses SessionService)
+
+```typescript
+// NEW CODE: Logout handler for clearing sessions
+import type { Request, Response, NextFunction, RequestHandler } from 'express';
+import { SessionService } from '../session/sessionService';
+import type { Logger } from '../types/middleware';
+
+export function createLogoutHandler(
+  sessionService: SessionService,
+  logger?: Logger
+): RequestHandler {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      // NEW CODE: Extract user from authenticated request (set by auth middleware)
+      const user = req.user;
+      
+      if (!user?.sub) {
+        // NEW CODE: User not authenticated - return error
+        return res.status(401).json({
+          error: {
+            code: 'AUTH_FAILED',
+            message: 'Authentication required for logout',
+            requiresLogout: false,
+            sessionExpired: false,
+            timestamp: new Date().toISOString(),
+          },
+        });
+      }
+
+      // NEW CODE: Clear session (idempotent - safe to call multiple times)
+      await sessionService.clearSession(user.sub);
+
+      const requestLogger = req.logger || logger;
+      requestLogger?.info?.('Session cleared on logout', {
+        event: 'session_cleared',
+        userId: user.sub,
+        correlationId: req.correlationId,
+      });
+
+      // NEW CODE: Return success response
+      res.status(200).json({
+        message: 'Logged out successfully',
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      // NEW CODE: Handle errors gracefully
+      const requestLogger = req.logger || logger;
+      requestLogger?.error?.('Logout handler error', {
+        event: 'logout_error',
+        error: error instanceof Error ? error.message : 'Unknown error',
+        userId: req.user?.sub,
+        correlationId: req.correlationId,
+      });
+      next(error);
+    }
+  };
+}
+```
+
+**Key Points:**
+- ❌ No direct Firebase SDK usage (delegates to SessionService)
+- ✅ NEW CODE: Session clearing logic
+- ✅ NEW CODE: Idempotent operation (safe to call multiple times)
+- ✅ NEW CODE: Requires authentication (uses auth middleware)
+- ✅ NEW CODE: Error handling and logging
+
+**Integration Note:** This handler must be used after the auth middleware to ensure `req.user` is set.
 
 ---
 
@@ -934,30 +998,35 @@ export function createAuthMiddleware(
 
 #### `packages/client/src/core/apiClient.ts`
 
-**Purpose:** Axios client with token injection and error handling
+**Purpose:** Axios client with token injection, error handling, and logout method
 
 **Firebase SDK Usage:** ✅ Uses `firebase/auth`
 
 ```typescript
-// NEW CODE: API client factory
-import axios, { AxiosInstance } from 'axios';
+// NEW CODE: API client factory with logout method
+import axios, { AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import { Auth } from 'firebase/auth';
 import { TokenManager } from './tokenManager';
 import { ErrorHandler } from './errorHandler';
 
-export function createApiClient(config: ApiClientConfig): AxiosInstance {
-  const { baseURL, auth, onLogout, maxRetries = 1 } = config;
+// NEW CODE: Extended AxiosInstance with logout method
+export interface ApiClient extends AxiosInstance {
+  logout: () => Promise<void>;
+}
 
-  const client = axios.create({ baseURL });
+export function createApiClient(config: ApiClientConfig): ApiClient {
+  const { baseURL, auth, onLogout, maxRetries = 1, logoutEndpoint = '/auth/logout' } = config;
+
+  const client = axios.create({ baseURL }) as ApiClient;
   const tokenManager = new TokenManager(auth);
   const errorHandler = new ErrorHandler(onLogout);
 
   // NEW CODE: Request interceptor - inject token
   client.interceptors.request.use(
-    async (config) => {
+    async (config: InternalAxiosRequestConfig) => {
       // FIREBASE SDK: Get current user token
       const token = await tokenManager.getToken(false);
-      if (token) {
+      if (token && config.headers) {
         config.headers.Authorization = `Bearer ${token}`;
       }
       return config;
@@ -975,6 +1044,37 @@ export function createApiClient(config: ApiClientConfig): AxiosInstance {
     }
   );
 
+  // NEW CODE: Logout method - clears server session and client tokens
+  client.logout = async (): Promise<void> => {
+    try {
+      // NEW CODE: Attempt to clear server-side session
+      // Get token for logout request
+      const token = await tokenManager.getToken(false);
+      if (token) {
+        try {
+          // NEW CODE: Call logout endpoint to clear server session
+          await client.post(logoutEndpoint, {}, {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+        } catch (error) {
+          // NEW CODE: Log but don't fail - graceful degradation
+          // If server logout fails, still proceed with client-side logout
+          console.warn('Failed to clear server session:', error);
+        }
+      }
+    } catch (error) {
+      // NEW CODE: Log but don't fail - graceful degradation
+      console.warn('Failed to get token for logout:', error);
+    }
+
+    // NEW CODE: Always perform client-side logout (even if server logout failed)
+    if (onLogout) {
+      await onLogout();
+    }
+  };
+
   return client;
 }
 ```
@@ -983,6 +1083,9 @@ export function createApiClient(config: ApiClientConfig): AxiosInstance {
 - ✅ Uses Firebase Auth SDK (`firebase/auth`)
 - ✅ NEW CODE: Interceptor setup
 - ✅ NEW CODE: Token injection logic
+- ✅ NEW CODE: Logout method that clears both server and client sessions
+- ✅ NEW CODE: Graceful degradation (client logout proceeds even if server logout fails)
+- ✅ NEW CODE: Idempotent logout (safe to call multiple times)
 
 ---
 
@@ -1034,14 +1137,10 @@ class TokenManager {
         }
         const token = await user.getIdToken(true);
 
-        // NEW CODE: Flush queued requests with new token
+        // NEW CODE: Flush queued requests
         await this.requestQueue.flush(token);
 
         return token;
-      } catch (error) {
-        // NEW CODE: Token refresh failed - reject all queued requests
-        await this.requestQueue.rejectAll(error);
-        throw error; // Re-throw to trigger logout in error handler
       } finally {
         // NEW CODE: Clear refresh promise
         this.refreshPromise = null;
@@ -1068,14 +1167,22 @@ class TokenManager {
 
 ```typescript
 // NEW CODE: Error handler for 401 responses
-import { AxiosError, AxiosInstance } from 'axios';
+import { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
 import { TokenManager } from './tokenManager';
+import { ERROR_CODES } from '@rapidraptor/auth-shared';
 
 class ErrorHandler {
   private onLogout?: () => void | Promise<void>;
 
   constructor(onLogout?: () => void | Promise<void>) {
     this.onLogout = onLogout;
+  }
+
+  // NEW CODE: Perform logout (calls callback if provided)
+  private async performLogout(): Promise<void> {
+    if (this.onLogout) {
+      await this.onLogout();
+    }
   }
 
   // NEW CODE: Handle 401 errors
@@ -1085,61 +1192,59 @@ class ErrorHandler {
     client: AxiosInstance,
     maxRetries: number
   ): Promise<any> {
-    const errorData = error.response?.data?.error;
+    const errorData = (error.response?.data as any)?.error;
 
-    // NEW CODE: Detect error type
-    if (errorData?.code === 'SESSION_EXPIRED') {
+    // NEW CODE: Detect error type - SESSION_EXPIRED
+    if (errorData?.code === ERROR_CODES.SESSION_EXPIRED) {
       // NEW CODE: Session expired - logout
-      if (this.onLogout) {
-        await this.onLogout();
-      }
+      await this.performLogout();
       return Promise.reject({
-        code: 'SESSION_EXPIRED',
+        code: ERROR_CODES.SESSION_EXPIRED,
         sessionExpired: true,
-        message: 'Session has expired'
+        message: 'Session has expired',
       });
     }
 
-    if (errorData?.code === 'TOKEN_EXPIRED') {
-      // NEW CODE: Token expired - refresh and retry
-      // Track retry count using a custom property on the error config
-      // Note: This approach works with axios interceptors as the config object
-      // is mutable and persists across interceptor calls
-      const retryCount = (error.config as any)._retryCount || 0;
-      if (retryCount >= maxRetries) {
-        // NEW CODE: Max retries exceeded - logout
-        if (this.onLogout) {
-          await this.onLogout();
-        }
-        return Promise.reject({
-          code: 'TOKEN_EXPIRED',
-          message: 'Token refresh failed after retries'
-        });
-      }
-
-      try {
-        // NEW CODE: Refresh token (may throw if refresh fails)
-        const newToken = await tokenManager.refreshToken();
-
-        // NEW CODE: Retry original request with new token
-        (error.config as any)._retryCount = retryCount + 1;
-        error.config.headers.Authorization = `Bearer ${newToken}`;
-        return client.request(error.config);
-      } catch (refreshError) {
-        // NEW CODE: Token refresh failed - logout
-        if (this.onLogout) {
-          await this.onLogout();
-        }
-        return Promise.reject({
-          code: 'TOKEN_EXPIRED',
-          message: 'Token refresh failed',
-          originalError: refreshError
-        });
-      }
+    // NEW CODE: Detect error type - TOKEN_EXPIRED
+    if (errorData?.code !== ERROR_CODES.TOKEN_EXPIRED) {
+      // NEW CODE: Other 401 errors - reject as-is
+      return Promise.reject(error);
     }
 
-    // NEW CODE: Other 401 errors
-    return Promise.reject(error);
+    // NEW CODE: Token expired - refresh and retry
+    const config = error.config as InternalAxiosRequestConfig & { _retryCount?: number };
+    const retryCount = config._retryCount || 0;
+
+    // NEW CODE: Check max retries
+    if (retryCount >= maxRetries) {
+      // NEW CODE: Max retries exceeded - logout
+      await this.performLogout();
+      return Promise.reject({
+        code: ERROR_CODES.TOKEN_EXPIRED,
+        message: 'Token refresh failed after retries',
+      });
+    }
+
+    // NEW CODE: Attempt token refresh and retry
+    try {
+      // FIREBASE SDK: Refresh token (may throw if refresh fails)
+      const newToken = await tokenManager.refreshToken();
+
+      // NEW CODE: Retry original request with new token
+      config._retryCount = retryCount + 1;
+      if (config.headers) {
+        config.headers.Authorization = `Bearer ${newToken}`;
+      }
+      return client.request(config);
+    } catch (refreshError) {
+      // NEW CODE: Token refresh failed - logout
+      await this.performLogout();
+      return Promise.reject({
+        code: ERROR_CODES.TOKEN_EXPIRED,
+        message: 'Token refresh failed',
+        originalError: refreshError,
+      });
+    }
   }
 }
 ```
@@ -1148,49 +1253,8 @@ class ErrorHandler {
 - ⚠️ No direct Firebase SDK usage (handles errors)
 - ✅ NEW CODE: Error detection logic
 - ✅ NEW CODE: Retry logic
-- ✅ NEW CODE: Logout triggering
-
----
-
-#### `packages/client/src/core/requestQueue.ts`
-
-**Purpose:** Queue requests during token refresh
-
-**Firebase SDK Usage:** ❌ No Firebase SDK (pure TypeScript)
-
-```typescript
-// NEW CODE: Request queue for token refresh
-class RequestQueue {
-  private queuedRequests: Array<{
-    resolve: (token: string) => void;
-    reject: (error: any) => void;
-  }> = [];
-
-  // NEW CODE: Queue a request to wait for token refresh
-  queue(resolve: (token: string) => void, reject: (error: any) => void): void {
-    this.queuedRequests.push({ resolve, reject });
-  }
-
-  // NEW CODE: Flush all queued requests with new token
-  async flush(token: string): Promise<void> {
-    const requests = [...this.queuedRequests];
-    this.queuedRequests = [];
-    requests.forEach(({ resolve }) => resolve(token));
-  }
-
-  // NEW CODE: Reject all queued requests (on refresh failure)
-  async rejectAll(error: any): Promise<void> {
-    const requests = [...this.queuedRequests];
-    this.queuedRequests = [];
-    requests.forEach(({ reject }) => reject(error));
-  }
-}
-```
-
-**Key Points:**
-- ❌ No Firebase SDK (pure TypeScript)
-- ✅ NEW CODE: Request queuing during token refresh
-- ✅ NEW CODE: Error propagation on refresh failure
+- ✅ NEW CODE: Logout triggering (via performLogout helper)
+- ✅ NEW CODE: Uses shared error codes from @rapidraptor/auth-shared
 
 ---
 
@@ -1201,12 +1265,12 @@ class RequestQueue {
 | `firebase/admin.ts` | ✅ `firebase-admin/app`, `firebase-admin/firestore` | ✅ Initialization wrapper, credential loading |
 | `sessionCache.ts` | ❌ None | ✅ All cache logic |
 | `firestoreSync.ts` | ✅ `firebase-admin/firestore` | ✅ Throttling, batching logic |
-| `sessionService.ts` | ✅ `firebase-admin/firestore` | ✅ Cache-first lookup, expiration logic |
-| `authMiddleware.ts` | ⚠️ Indirect (via JWT verifier) | ✅ Session validation, error handling |
-| `apiClient.ts` | ✅ `firebase/auth` | ✅ Interceptor setup |
+| `sessionService.ts` | ✅ `firebase-admin/firestore` | ✅ Cache-first lookup, expiration logic, logout timestamp tracking |
+| `authMiddleware.ts` | ⚠️ Indirect (via JWT verifier) | ✅ Session validation, JWT iat extraction, token revocation checking, error handling |
+| `logoutHandler.ts` | ❌ None | ✅ Session clearing on logout, logout timestamp tracking |
+| `apiClient.ts` | ✅ `firebase/auth` | ✅ Interceptor setup, logout method |
 | `tokenManager.ts` | ✅ `firebase/auth` | ✅ Queuing, refresh logic |
-| `errorHandler.ts` | ❌ None | ✅ Error detection, retry logic |
-| `requestQueue.ts` | ❌ None | ✅ Request queuing, error propagation |
+| `errorHandler.ts` | ❌ None | ✅ Error detection, retry logic, logout triggering |
 
 **Key Insight:** Most Firebase SDK usage is for:
 - **Server:** Firestore read/write operations
@@ -1243,54 +1307,36 @@ interface SessionInfo {
 
 **Document Size:** ~200 bytes per session
 
+### User Logouts Document Structure
+
+**Collection:** `user_logouts`  
+**Document ID:** `{userId}`
+
+```json
+{
+  "userId": "abc123",
+  "loggedOutAt": "2024-01-15T15:00:00Z",
+  "expiresAt": "2024-01-15T16:00:00Z"
+}
+```
+
+**Purpose:** Tracks when users logged out to prevent re-authentication with JWTs issued before logout.  
+**TTL:** 1 hour (matches typical JWT lifetime)  
+**Document Size:** ~150 bytes per logout record  
+**Auto-cleanup:** Documents expire after 1 hour and can be cleaned up via Firestore TTL policies (optional)  
+**Logic:** When a JWT is verified, its `iat` (issued at) timestamp is compared with `loggedOutAt`. If `iat < loggedOutAt`, the token is rejected as it was issued before logout.
+
 ### Error Response Format
 
 ```typescript
 interface ErrorResponse {
   error: {
-    code: 'SESSION_EXPIRED' | 'TOKEN_EXPIRED' | 'AUTH_FAILED' | 'INTERNAL_ERROR' | 'SERVICE_UNAVAILABLE';
+    code: 'SESSION_EXPIRED' | 'TOKEN_EXPIRED' | 'AUTH_FAILED' | 'INTERNAL_ERROR';
     message: string;
     requiresLogout: boolean;
     sessionExpired: boolean;    // true for SESSION_EXPIRED, false for TOKEN_EXPIRED
-    timestamp: string;          // ISO 8601 timestamp
+    timestamp: string;
   };
-}
-```
-
-**Error Response Examples:**
-
-```typescript
-// Session expired
-{
-  error: {
-    code: 'SESSION_EXPIRED',
-    message: 'Session has expired due to inactivity',
-    requiresLogout: true,
-    sessionExpired: true,
-    timestamp: '2024-01-15T14:30:00.000Z'
-  }
-}
-
-// Token expired
-{
-  error: {
-    code: 'TOKEN_EXPIRED',
-    message: 'Token has expired',
-    requiresLogout: false,  // Client should refresh token
-    sessionExpired: false,
-    timestamp: '2024-01-15T14:30:00.000Z'
-  }
-}
-
-// Service unavailable (Firestore down)
-{
-  error: {
-    code: 'SERVICE_UNAVAILABLE',
-    message: 'User sessions could not be validated',
-    requiresLogout: false,
-    sessionExpired: false,
-    timestamp: '2024-01-15T14:30:00.000Z'
-  }
 }
 ```
 
@@ -1312,13 +1358,16 @@ class SessionService {
   // Check if session is valid (cache-first, Firestore fallback)
   async isSessionValid(userId: string): Promise<boolean>;
 
+  // Check if JWT token was issued before logout
+  async isTokenRevoked(userId: string, tokenIssuedAt: Date): Promise<boolean>;
+
   // Create new session for user
   async createSession(userId: string): Promise<void>;
 
   // Update last activity timestamp
   async updateLastActivity(userId: string): Promise<void>;
 
-  // Clear session (logout)
+  // Clear session (logout) - also marks session as revoked
   async clearSession(userId: string): Promise<void>;
 
   // Warmup cache from Firestore on startup
@@ -1330,11 +1379,39 @@ class SessionService {
 
 ```typescript
 function createAuthMiddleware(
-  userTokenConfig: UserTokenConfig,
-  googleConfig: GoogleAuthConfig,
+  userTokenVerifier: UserTokenVerifier,
   sessionService: SessionService,
   logger?: Logger
 ): RequestHandler;
+```
+
+#### Logout Handler Factory
+
+```typescript
+function createLogoutHandler(
+  sessionService: SessionService,
+  logger?: Logger
+): RequestHandler;
+```
+
+**Usage Example:**
+```typescript
+import { createAuthMiddleware, createLogoutHandler, SessionService } from '@rapidraptor/auth/server';
+
+// Create session service
+const sessionService = new SessionService(/* ... */);
+
+// Create auth middleware (protects routes)
+const authMiddleware = createAuthMiddleware(userTokenVerifier, sessionService, logger);
+
+// Create logout handler (clears sessions)
+const logoutHandler = createLogoutHandler(sessionService, logger);
+
+// Apply middleware
+app.use('/api', authMiddleware);  // Protect all /api routes
+
+// Expose logout endpoint
+app.post('/auth/logout', authMiddleware, logoutHandler);  // Requires auth, then clears session
 ```
 
 ### Client Package API
@@ -1342,7 +1419,11 @@ function createAuthMiddleware(
 #### API Client Factory
 
 ```typescript
-function createApiClient(config: ApiClientConfig): AxiosInstance;
+interface ApiClient extends AxiosInstance {
+  logout: () => Promise<void>;
+}
+
+function createApiClient(config: ApiClientConfig): ApiClient;
 
 interface ApiClientConfig {
   baseURL: string;
@@ -1350,7 +1431,33 @@ interface ApiClientConfig {
   onLogout?: () => void | Promise<void>;
   maxRetries?: number;            // Default: 1
   timeout?: number;
+  logoutEndpoint?: string;        // Default: '/auth/logout'
 }
+```
+
+**Usage Example:**
+```typescript
+import { createApiClient } from '@rapidraptor/auth/client';
+import { signOut } from 'firebase/auth';
+import { auth } from './firebase';
+
+const apiClient = createApiClient({
+  baseURL: '/api',
+  auth,
+  onLogout: async () => {
+    // Clear Firebase Auth tokens
+    await signOut(auth);
+    // Redirect to login
+    window.location.href = '/login';
+  },
+  logoutEndpoint: '/auth/logout',  // Optional: defaults to '/auth/logout'
+});
+
+// Use for API calls
+const response = await apiClient.get('/users');
+
+// Call logout when user clicks logout button
+await apiClient.logout();  // Clears server session + client tokens
 ```
 
 #### React Hooks
@@ -1464,9 +1571,11 @@ function useSessionMonitor(options?: {
 |--------|--------|-------|
 | Session validation (cache hit) | < 10ms | In-memory lookup |
 | Session validation (cache miss) | < 100ms | Firestore read |
+| Token revocation check (when session missing) | < 100ms | Firestore read to user_logouts |
 | Cache hit rate | 60%+ | Realistic for Cloud Run |
-| Firestore reads/day | < 50,000 | For 1,000 users, 10 req/hour |
+| Firestore reads/day | < 50,000 | For 1,000 users, 10 req/hour (includes revocation checks) |
 | Firestore writes/day | < 300,000 | Throttled to 1 per 5 min per user |
+| Logout writes/day | < 1,000 | One per logout (much lower than session writes) |
 
 ## Security Considerations
 
@@ -1486,6 +1595,27 @@ function useSessionMonitor(options?: {
    - Automatic expiration after inactivity
    - No way to extend expired session
    - User must re-authenticate
+
+4. **Session Clearing (Logout):**
+   - Only authenticated users can clear their own sessions
+   - Logout endpoint requires valid JWT token
+   - Session immediately removed from cache and Firestore
+   - **Logout timestamp tracking**: Logout time stored in `user_logouts` collection
+   - **JWT revocation protection**: Prevents use of JWTs issued before logout
+   - Idempotent operation (safe to call multiple times)
+   - No way to reactivate cleared session without re-authentication
+
+5. **JWT Revocation Limitation:**
+   - **Problem**: JWTs cannot be revoked once issued (they're stateless)
+   - **Solution**: Track logout timestamps and compare with JWT's `iat` (issued at) claim
+   - **Protection Logic**: 
+     - Extract `iat` from JWT payload
+     - Compare `iat` with `loggedOutAt` timestamp
+     - If `iat < loggedOutAt` → reject token (old token from before logout)
+     - If `iat >= loggedOutAt` → allow token (new token from after logout)
+   - **User Experience**: Users can log in again immediately and get new JWTs
+   - **Trade-off**: Small performance cost (one extra Firestore read per request when session doesn't exist)
+   - **Auto-cleanup**: Logout records expire after 1 hour (can use Firestore TTL policies)
 
 ### Token Security
 
@@ -1511,62 +1641,6 @@ function useSessionMonitor(options?: {
    - No sensitive information in sessions
    - Encrypted in transit and at rest (Firestore default)
 
-## Integration Considerations
-
-### Current Codebase Integration
-
-#### Backend Integration Points
-
-**Current Error Handler (`packages/proxy/src/app.ts`):**
-- ✅ Already handles `UserTokenVerificationError` and `AuthenticationError`
-- ⚠️ **Gap:** Missing `sessionExpired` flag in error response
-- **Fix:** New middleware adds `sessionExpired` flag to all 401 responses
-
-**Current Auth Middleware (`packages/proxy/src/auth/middleware.ts`):**
-- ✅ Already performs JWT verification
-- **Integration:** New middleware wraps existing JWT verifier
-- **Change:** Adds session validation step after JWT verification
-
-#### Frontend Integration Points
-
-**Current API Client (`src/services/api/config.ts`):**
-- ⚠️ **Gap:** Logs out on ANY 401 with `requiresLogout=true`
-- ⚠️ **Gap:** Does NOT distinguish `SESSION_EXPIRED` vs `TOKEN_EXPIRED`
-- ⚠️ **Gap:** Does NOT refresh tokens
-- **Fix:** Replace with `@rapidraptor/auth/client` which handles:
-  - `SESSION_EXPIRED` → logout
-  - `TOKEN_EXPIRED` → refresh token and retry
-
-**Current Polling Hook (`src/hooks/useChannelStatus.ts`):**
-- ⚠️ **Gap:** Continues polling after 401 errors
-- **Fix:** Check for `SESSION_EXPIRED` or `TOKEN_EXPIRED` codes and stop polling
-- **Implementation:**
-  ```typescript
-  // In useChannelStatus hook
-  catch (error) {
-    if (error.code === 'SESSION_EXPIRED' || error.code === 'TOKEN_EXPIRED') {
-      clearInterval(intervalRef.current);
-      setError(error);
-      return; // Stop polling
-    }
-    // Handle other errors
-  }
-  ```
-
-### Migration Checklist
-
-**Backend:**
-- [ ] Replace `packages/proxy/src/auth/middleware.ts` with `@rapidraptor/auth/server` middleware
-- [ ] Initialize `SessionService` in `packages/proxy/src/index.ts`
-- [ ] Update error handler to include `sessionExpired` flag (if not already added by middleware)
-- [ ] Add Firestore environment variables
-
-**Frontend:**
-- [ ] Replace `src/services/api/config.ts` with `@rapidraptor/auth/client`
-- [ ] Update `src/hooks/useChannelStatus.ts` to stop polling on auth errors
-- [ ] Test token refresh flow
-- [ ] Test session expiration flow
-
 ## Implementation Details
 
 ### Session Cache Implementation
@@ -1589,11 +1663,6 @@ class SessionCache {
 - Manual expiration check on `isExpired()`
 - Periodic cleanup of expired sessions (optional)
 - No size limit (memory is minimal)
-
-**Race Condition Handling:**
-- Session creation uses Firestore transactions (`ensureSession()` method)
-- Prevents duplicate session creation on concurrent requests
-- Transaction ensures atomicity: check existence → create if missing
 
 ### Firestore Sync Implementation
 
@@ -1634,6 +1703,79 @@ class TokenManager {
 3. Refresh completes → Flush queue with new token
 4. All requests retry with new token
 
+### Logout Implementation
+
+**Server-Side Logout Handler:**
+```typescript
+function createLogoutHandler(
+  sessionService: SessionService,
+  logger?: Logger
+): RequestHandler;
+```
+
+**Flow:**
+1. User initiates logout → Frontend calls `apiClient.logout()`
+2. Client sends `POST /auth/logout` with JWT token
+3. Auth middleware verifies JWT and sets `req.user`
+4. Logout handler extracts `userId` from `req.user.sub`
+5. SessionService clears session:
+   - Immediately removes from in-memory cache
+   - Stores logout timestamp in `user_logouts` collection (1 hour TTL)
+   - Synchronously deletes session document from Firestore
+6. Returns 200 OK response
+7. Client receives response and calls `onLogout` callback
+8. `onLogout` callback:
+   - Calls Firebase `signOut()` to clear client tokens
+   - Redirects to login page
+
+**JWT Revocation Protection:**
+- After logout, if user still has old JWT token (issued before logout) and makes request:
+  - JWT verification passes (token signature is valid, not expired)
+  - Session validation fails (session was deleted)
+  - Token revocation check: Extract `iat` from JWT, compare with `loggedOutAt`
+  - If `iat < loggedOutAt` → Request rejected with `SESSION_EXPIRED` error
+  - New session is NOT created (prevents re-authentication with old token)
+- If user logs in again (gets new JWT):
+  - New JWT has `iat` >= `loggedOutAt` (issued after logout)
+  - Token revocation check passes
+  - New session is created (user can authenticate with new token)
+- Logout record expires after 1 hour (matches typical JWT lifetime)
+- This addresses the JWT limitation: cannot revoke tokens, but can reject tokens issued before logout
+
+**Key Design Decisions:**
+- **Idempotent**: Logout can be called multiple times safely (no error if session already cleared)
+- **Graceful Degradation**: Client-side logout proceeds even if server logout fails
+- **Security**: Logout endpoint requires authentication (uses auth middleware)
+- **JWT Revocation Protection**: Logout timestamp tracking prevents use of JWTs issued before logout
+- **User Experience**: Users can log in again immediately and get new JWTs (not blocked by revocation)
+- **Performance**: Cache clearing is immediate; Firestore deletion is synchronous for security
+- **Revocation TTL**: 1 hour expiration matches typical JWT lifetime (balances security and storage)
+- **Error Handling**: Server errors are logged but don't prevent client-side logout
+
+**Client-Side Logout Method:**
+```typescript
+interface ApiClient extends AxiosInstance {
+  logout: () => Promise<void>;
+}
+```
+
+**Flow:**
+1. `apiClient.logout()` is called
+2. Attempts to get current token
+3. If token exists, calls logout endpoint (`POST /auth/logout`)
+4. If server logout fails, logs warning but continues
+5. Always calls `onLogout` callback (provided by application)
+6. `onLogout` callback handles:
+   - Firebase `signOut()`
+   - Redirect to login
+   - Any other cleanup
+
+**Integration Requirements:**
+- Applications must expose logout endpoint using logout handler
+- Applications must provide `onLogout` callback when creating API client
+- Logout endpoint should be protected by auth middleware
+- **Security Note**: While revocation tracking prevents re-authentication, applications should still ensure `onLogout` callback clears Firebase Auth tokens for complete client-side cleanup
+
 ## Testing Strategy
 
 ### Unit Tests
@@ -1641,24 +1783,28 @@ class TokenManager {
 **Server Package:**
 - SessionCache: get, set, isExpired, clear
 - FirestoreSync: queueWrite, batchSync, throttling
-- SessionService: isSessionValid, createSession, updateLastActivity
-- AuthMiddleware: session validation, error responses
+- SessionService: isSessionValid, isTokenRevoked, createSession, updateLastActivity, clearSession
+- AuthMiddleware: session validation, JWT iat extraction, token revocation checking, error responses
+- LogoutHandler: session clearing, logout timestamp tracking, error handling
 
 **Client Package:**
-- API Client: token injection, error handling
+- API Client: token injection, error handling, logout method
 - TokenManager: refresh, queuing
-- ErrorHandler: SESSION_EXPIRED vs TOKEN_EXPIRED detection
+- ErrorHandler: SESSION_EXPIRED vs TOKEN_EXPIRED detection, logout triggering
 
 ### Integration Tests
 
 **Server Package:**
 - Full flow: JWT verification → session check → activity update
-- Firestore emulator for session persistence
+- Logout flow: JWT verification → session clearing → logout timestamp tracking → response
+- Token revocation flow: JWT verification → extract iat → session check → compare iat with logout timestamp → reject if token issued before logout
+- Firestore emulator for session persistence and logout timestamp tracking
 - Cache warmup from Firestore
 
 **Client Package:**
 - Full request/response cycle with MSW
 - Token refresh and retry flow
+- Logout flow: server session clearing + client token clearing
 - Concurrent request handling
 
 ### Performance Tests
@@ -1678,6 +1824,8 @@ SESSION_INACTIVITY_TIMEOUT_HOURS=24
 SESSION_FIRESTORE_SYNC_INTERVAL_MS=300000
 SESSION_FIRESTORE_WRITE_THROTTLE_MS=300000
 FIRESTORE_SESSIONS_COLLECTION=user_sessions
+FIRESTORE_LOGOUTS_COLLECTION=user_logouts
+LOGOUT_TTL_HOURS=1
 FIREBASE_PROJECT_ID=${PROJECT_ID}
 FIREBASE_PRIVATE_KEY=${PRIVATE_KEY}
 FIREBASE_CLIENT_EMAIL=${CLIENT_EMAIL}
@@ -1700,8 +1848,9 @@ FIREBASE_CLIENT_EMAIL=${CLIENT_EMAIL}
 - Old sessions ignored (no migration needed)
 
 **Phase 3: Frontend Deployment**
-- Deploy frontend with new error handling
+- Deploy frontend with new error handling and logout method
 - Users may need to re-login (expected)
+- Logout functionality available immediately
 
 **Rollback Plan:**
 - Backend: Revert to previous version (sessions ignored)
@@ -1713,9 +1862,12 @@ FIREBASE_CLIENT_EMAIL=${CLIENT_EMAIL}
 **Key Metrics:**
 - Session creation rate
 - Session expiration rate
+- Session clearing rate (logout)
+- Token revocation check rate (Firestore reads for user_logouts)
 - Cache hit rate
-- Firestore read/write operations
+- Firestore read/write operations (including user_logouts collection)
 - Error rates (SESSION_EXPIRED vs TOKEN_EXPIRED)
+- Logout success/failure rates
 - Memory usage
 
 **Alerts:**

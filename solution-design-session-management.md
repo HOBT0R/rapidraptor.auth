@@ -1,9 +1,13 @@
 ---
 title: Solution Design - Session Management and Token Expiration
-version: 1.0
+version: 1.1
 status: Draft
-date: 2024
+date: 2025-12-26
 ---
+
+**Version History:**
+- **v1.1**: Added complete logout flow (server-side and client-side session clearing)
+- **v1.0**: Initial design for session management and token expiration
 
 # Solution Design: Session Management and Token Expiration Fix
 
@@ -16,6 +20,7 @@ This document outlines a solution to implement proper session management with in
 - Proper distinction between session expiration and token expiration
 - Improved user experience with automatic token refresh
 - Reduced security risk from long-lived sessions
+- Complete session lifecycle management (create, validate, clear)
 - Reusable authentication library for future projects
 
 ## Problem Statement
@@ -53,7 +58,8 @@ We will create a unified `@rapidraptor/auth` library that provides:
 1. **Server-Side Session Management**: Track user sessions in Firestore with inactivity timeout
 2. **Client-Side Token Management**: Automatically handle token refresh and session expiration
 3. **Unified Error Handling**: Distinguish between token expiration and session expiration
-4. **Reusable Components**: Single source of truth for authentication across all projects
+4. **Complete Logout Flow**: Server-side session invalidation on logout
+5. **Reusable Components**: Single source of truth for authentication across all projects
 
 ### Core Concepts
 
@@ -140,6 +146,7 @@ The solution consists of three main components:
 - **API Client**: Axios-based HTTP client with automatic token injection
 - **Error Handler**: Detects SESSION_EXPIRED vs TOKEN_EXPIRED and handles appropriately
 - **Token Manager**: Handles token refresh with request queuing
+- **Logout Method**: Unified logout that clears both server-side session and client-side tokens
 - **React Hooks**: `useApiClient`, `useSessionMonitor` for React applications
 
 #### 1.2 Server Package (`/server`)
@@ -147,11 +154,13 @@ The solution consists of three main components:
 - **Session Cache**: In-memory cache for fast session validation
 - **Firestore Sync**: Batched writes to Firestore for persistence
 - **Auth Middleware**: Express middleware for session validation
+- **Logout Handler**: Express middleware/handler for clearing sessions on logout
 
 **Server Package Functionality:**
 - Session creation on first authenticated request
 - Activity tracking on each request
 - Session expiration after 24 hours of inactivity
+- Session clearing on logout (cache + Firestore)
 - Cache-first lookup (90%+ cache hit rate expected)
 - Firestore persistence for multi-instance deployments
 
@@ -171,7 +180,9 @@ The solution consists of three main components:
 **Integration Points:**
 - Import and initialize SessionService from `@rapidraptor/auth/server`
 - Use Auth Middleware from the library in Express routes
+- Use Logout Handler from the library for logout endpoint
 - Configure Firebase Admin SDK for Firestore access
+- Expose logout endpoint (e.g., `POST /auth/logout`) using the logout handler
 
 ### Component 3: Frontend Token Management
 
@@ -181,6 +192,7 @@ The solution consists of three main components:
 - Automatic token injection in API requests
 - Token refresh on TOKEN_EXPIRED errors
 - Automatic logout on SESSION_EXPIRED errors
+- Unified logout method that clears server-side session and client-side tokens
 - Request queuing during token refresh
 - Stop polling on authentication errors
 
@@ -194,6 +206,7 @@ graph TB
         A[React App] --> B[Auth Client Library]
         B --> C[API Client]
         C --> D[HTTP Request with JWT]
+        A --> P[Logout Request]
     end
     
     subgraph "Backend (Proxy)"
@@ -201,6 +214,8 @@ graph TB
         E --> F[JWT Verification]
         F --> G[Session Validation]
         G --> H[Auth Server Library]
+        P[Logout Request] --> Q[Logout Handler]
+        Q --> H
     end
     
     subgraph "Auth Server Library - Internal Components"
@@ -267,6 +282,20 @@ sequenceDiagram
     Backend-->>API Client: 401 SESSION_EXPIRED
     API Client->>Frontend: Logout user
     Frontend->>User: Redirect to login
+    
+    Note over User,Firestore: User initiates logout
+    
+    User->>Frontend: Click Logout
+    Frontend->>API Client: Call logout()
+    API Client->>Backend: POST /auth/logout
+    Backend->>Session Service: Clear session
+    Session Service->>Firestore: Delete session
+    Session Service->>Session Cache: Clear cache
+    Session Service-->>Backend: Session cleared
+    Backend-->>API Client: 200 OK
+    API Client->>API Client: Clear client tokens
+    API Client->>Frontend: Logout complete
+    Frontend->>User: Redirect to login
 ```
 
 ### Error Handling Flow
@@ -283,8 +312,70 @@ graph TD
     D -->|SESSION_EXPIRED| I[Logout User]
     D -->|AUTH_FAILED| I
     G --> J[Continue]
-    I --> K[Redirect to Login]
+    H --> L[Clear Server Session]
+    I --> L
+    L --> M[Clear Client Tokens]
+    M --> K[Redirect to Login]
 ```
+
+### Logout Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Frontend
+    participant API Client
+    participant Backend
+    participant Logout Handler
+    participant Session Service
+    participant Firestore
+    
+    User->>Frontend: Click Logout
+    Frontend->>API Client: apiClient.logout()
+    API Client->>Backend: POST /auth/logout (with JWT)
+    Backend->>Logout Handler: Process logout
+    Logout Handler->>Session Service: clearSession(userId)
+    Session Service->>Session Service: Clear from cache
+    Session Service->>Firestore: Delete session document
+    Session Service-->>Logout Handler: Session cleared
+    Logout Handler-->>Backend: 200 OK
+    Backend-->>API Client: 200 OK
+    API Client->>API Client: Call onLogout callback
+    API Client->>API Client: Clear local tokens
+    API Client-->>Frontend: Logout complete
+    Frontend->>User: Redirect to login
+```
+
+### Logout Implementation Details
+
+**Client-Side Logout:**
+- The API client provides a `logout()` method that:
+  1. Calls the server logout endpoint (`POST /auth/logout`) with the current JWT token
+  2. On success, calls the `onLogout` callback (provided by the application)
+  3. The `onLogout` callback typically:
+     - Calls Firebase `signOut()` to clear client-side tokens
+     - Redirects to the login page
+  4. If the server logout fails, client-side logout still proceeds (graceful degradation)
+
+**Server-Side Logout:**
+- The logout handler:
+  1. Requires authentication (uses the same auth middleware)
+  2. Extracts `userId` from the authenticated request (`req.user.sub`)
+  3. Calls `sessionService.clearSession(userId)` which:
+     - Immediately clears the session from the in-memory cache
+     - Deletes the session document from Firestore
+  4. Returns 200 OK on success
+
+**Key Design Decisions:**
+- **Idempotent**: Logout can be called multiple times safely (no error if session already cleared)
+- **Graceful Degradation**: Client-side logout proceeds even if server logout fails
+- **Security**: Logout endpoint requires authentication to prevent unauthorized session clearing
+- **Performance**: Cache clearing is immediate; Firestore deletion is synchronous for security
+
+**Integration Requirements:**
+- Applications must expose a logout endpoint (e.g., `POST /auth/logout`) using the provided logout handler
+- Applications must provide an `onLogout` callback when creating the API client
+- The logout endpoint should be protected by the auth middleware to ensure only authenticated users can clear their own sessions
 
 ## Cost Estimate
 
@@ -354,8 +445,9 @@ graph TD
 1. ✅ Sessions expire after 24 hours of inactivity
 2. ✅ Token expiration triggers automatic refresh (if session valid)
 3. ✅ Session expiration triggers automatic logout
-4. ✅ Polling stops on authentication errors
-5. ✅ Session data persists across server restarts
+4. ✅ User-initiated logout clears both server-side session and client-side tokens
+5. ✅ Polling stops on authentication errors
+6. ✅ Session data persists across server restarts
 
 ### Performance Requirements
 
@@ -370,6 +462,8 @@ graph TD
 2. ✅ Clear error messages for session expiration
 3. ✅ Automatic token refresh is transparent to user
 4. ✅ Polling gracefully handles authentication errors
+5. ✅ Logout immediately invalidates session on server (security)
+6. ✅ Logout works consistently across all applications using the library
 
 ## Risks and Mitigations
 
@@ -409,6 +503,16 @@ graph TD
 - Deploy frontend second (handles new error codes)
 - Communicate deployment window to users
 
+### Risk 5: Logout Endpoint Not Implemented
+
+**Risk:** Applications may forget to implement the logout endpoint, leaving sessions active after logout
+
+**Mitigation:**
+- Provide clear documentation and examples
+- Include logout handler in library exports
+- Make logout endpoint integration part of integration checklist
+- Add validation/warnings in development mode if logout endpoint is missing
+
 ## Deployment Strategy
 
 ### Phased Rollout
@@ -447,6 +551,8 @@ graph TD
 - **Inactivity Timeout**: Period of time (24 hours) after which session expires
 - **Cache Hit**: Session found in in-memory cache (fast path)
 - **Cache Miss**: Session not in cache, requires Firestore lookup (slow path)
+- **Logout**: Process of clearing both server-side session (Firestore + cache) and client-side tokens
+- **Logout Handler**: Server-side middleware that clears sessions when logout endpoint is called
 
 ### References
 

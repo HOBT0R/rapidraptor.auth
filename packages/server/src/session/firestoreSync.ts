@@ -17,7 +17,7 @@ export class FirestoreSync {
   constructor(
     firestore: Firestore,
     throttleMs: number,
-    collectionName: string = DEFAULTS.FIRESTORE_COLLECTION_NAME,
+    collectionName: string = DEFAULTS.FIRESTORE_SESSIONS_COLLECTION_NAME,
   ) {
     this.firestore = firestore;
     this.writeQueue = new Map();

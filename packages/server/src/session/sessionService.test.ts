@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SessionService } from './sessionService.js';
+import { SessionService, TokenRevokedError } from './sessionService.js';
 import { SessionCache } from './sessionCache.js';
 import { FirestoreSync } from './firestoreSync.js';
 import type { Firestore, Timestamp } from 'firebase-admin/firestore';
 import type { SessionInfo } from '@rapidraptor/auth-shared';
+import { SessionValidationStatus } from '@rapidraptor/auth-shared';
 
 describe('SessionService', () => {
   let sessionService: SessionService;
@@ -14,6 +15,10 @@ describe('SessionService', () => {
   let mockCollection: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockDoc: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockLogoutsCollection: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockLogoutDoc: any;
   const inactivityTimeout = 24 * 60 * 60 * 1000; // 24 hours
 
   beforeEach(() => {
@@ -45,9 +50,22 @@ describe('SessionService', () => {
       })),
     };
 
+    mockLogoutDoc = {
+      get: vi.fn(),
+      set: vi.fn(),
+    };
+
+    mockLogoutsCollection = {
+      doc: vi.fn(() => mockLogoutDoc),
+    };
 
     mockFirestore = {
-      collection: vi.fn(() => mockCollection),
+      collection: vi.fn((collectionName: string) => {
+        if (collectionName === 'user_logouts') {
+          return mockLogoutsCollection;
+        }
+        return mockCollection;
+      }),
       runTransaction: vi.fn(),
     } as any;
 
@@ -59,8 +77,8 @@ describe('SessionService', () => {
     );
   });
 
-  describe('isSessionValid', () => {
-    it('should return true for valid cached session', async () => {
+  describe('validateSession', () => {
+    it('should return VALID for valid cached session', async () => {
       const session: SessionInfo = {
         userId: 'user1',
         createdAt: new Date(),
@@ -69,12 +87,12 @@ describe('SessionService', () => {
       };
       cache.set('user1', session);
 
-      const isValid = await sessionService.isSessionValid('user1');
-      expect(isValid).toBe(true);
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.VALID);
       expect(mockFirestore.collection).not.toHaveBeenCalled();
     });
 
-    it('should return false for expired cached session and check Firestore', async () => {
+    it('should return EXPIRED for expired cached session and check Firestore', async () => {
       const expiredSession: SessionInfo = {
         userId: 'user1',
         createdAt: new Date(Date.now() - inactivityTimeout),
@@ -84,14 +102,29 @@ describe('SessionService', () => {
       cache.set('user1', expiredSession);
 
       mockDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          createdAt: { toDate: () => expiredSession.createdAt },
+          lastActivityAt: { toDate: () => expiredSession.lastActivityAt },
+          expiresAt: { toDate: () => expiredSession.expiresAt },
+        }),
+      });
+
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.EXPIRED);
+    });
+
+    it('should return NOT_FOUND when Firestore document does not exist', async () => {
+      mockDoc.get.mockResolvedValue({
         exists: false,
       });
 
-      const isValid = await sessionService.isSessionValid('user1');
-      expect(isValid).toBe(false);
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.NOT_FOUND);
     });
 
-    it('should check Firestore on cache miss and update cache', async () => {
+    it('should return VALID when Firestore document exists and is not expired', async () => {
       const now = new Date();
       const expiresAt = new Date(now.getTime() + inactivityTimeout);
       const firestoreTimestamp = {
@@ -108,12 +141,83 @@ describe('SessionService', () => {
         }),
       });
 
-      const isValid = await sessionService.isSessionValid('user1');
-      expect(isValid).toBe(true);
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.VALID);
       expect(cache.get('user1')).toBeTruthy();
     });
 
-    it('should return false when Firestore document does not exist', async () => {
+    it('should return EXPIRED when Firestore document exists but is expired', async () => {
+      const now = new Date();
+      const expiredTime = new Date(now.getTime() - 1000);
+      const firestoreTimestamp = {
+        toDate: () => expiredTime,
+      } as Timestamp;
+
+      mockDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          createdAt: firestoreTimestamp,
+          lastActivityAt: firestoreTimestamp,
+          expiresAt: { toDate: () => expiredTime },
+        }),
+      });
+
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.EXPIRED);
+    });
+
+    it('should return DATA_INTEGRITY_ERROR when cached session userId mismatch', async () => {
+      const session: SessionInfo = {
+        userId: 'user2', // Mismatch
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        expiresAt: new Date(Date.now() + inactivityTimeout),
+      };
+      cache.set('user1', session);
+
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.DATA_INTEGRITY_ERROR);
+      expect(cache.get('user1')).toBeNull(); // Should be cleared
+    });
+
+    it('should return DATA_INTEGRITY_ERROR when Firestore document userId mismatch', async () => {
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + inactivityTimeout);
+      const firestoreTimestamp = {
+        toDate: () => now,
+      } as Timestamp;
+
+      mockDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user2', // Mismatch with document ID
+          createdAt: firestoreTimestamp,
+          lastActivityAt: firestoreTimestamp,
+          expiresAt: { toDate: () => expiresAt },
+        }),
+      });
+
+      const status = await sessionService.validateSession('user1');
+      expect(status).toBe(SessionValidationStatus.DATA_INTEGRITY_ERROR);
+    });
+  });
+
+  describe('isSessionValid', () => {
+    it('should return true for valid session', async () => {
+      const session: SessionInfo = {
+        userId: 'user1',
+        createdAt: new Date(),
+        lastActivityAt: new Date(),
+        expiresAt: new Date(Date.now() + inactivityTimeout),
+      };
+      cache.set('user1', session);
+
+      const isValid = await sessionService.isSessionValid('user1');
+      expect(isValid).toBe(true);
+    });
+
+    it('should return false for invalid session', async () => {
       mockDoc.get.mockResolvedValue({
         exists: false,
       });
@@ -151,7 +255,7 @@ describe('SessionService', () => {
       expect(mockDoc.set).not.toHaveBeenCalled();
     });
 
-    it('should recreate session if it exists but is expired', async () => {
+    it('should throw error if session exists but is expired', async () => {
       const expiredSession: SessionInfo = {
         userId: 'user1',
         createdAt: new Date(Date.now() - inactivityTimeout),
@@ -172,13 +276,11 @@ describe('SessionService', () => {
         }),
       });
 
-      const wasCreated = await sessionService.ensureSession('user1');
-      expect(wasCreated).toBe(true);
-      expect(cache.get('user1')).toBeTruthy();
-      // Verify new session was created (expiresAt should be in the future)
-      const newSession = cache.get('user1');
-      expect(newSession!.expiresAt.getTime()).toBeGreaterThan(Date.now());
-      expect(mockDoc.set).toHaveBeenCalled();
+      await expect(sessionService.ensureSession('user1')).rejects.toThrow(
+        'Session has expired. Please logout and login again.',
+      );
+      // Verify session was NOT recreated
+      expect(mockDoc.set).not.toHaveBeenCalled();
     });
 
     it('should recreate session if data integrity issue detected (userId mismatch)', async () => {
@@ -199,6 +301,68 @@ describe('SessionService', () => {
       // Verify new session was created with correct userId
       const newSession = cache.get('user1');
       expect(newSession!.userId).toBe('user1');
+      expect(mockDoc.set).toHaveBeenCalled();
+    });
+
+    it('should throw error if token was issued before logout', async () => {
+      // Mock logout record exists
+      const loggedOutAt = new Date();
+      const tokenIssuedAt = new Date(loggedOutAt.getTime() - 1000); // 1 second before logout
+
+      mockLogoutDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          loggedOutAt: { toDate: () => loggedOutAt },
+          expiresAt: { toDate: () => new Date(loggedOutAt.getTime() + 3600000) }, // 1 hour TTL, still valid
+        }),
+      });
+
+      // Mock Firestore to return no document (session doesn't exist)
+      mockDoc.get.mockResolvedValue({
+        exists: false,
+      });
+
+      await expect(sessionService.ensureSession('user1', tokenIssuedAt)).rejects.toThrow(
+        TokenRevokedError,
+      );
+      expect(mockDoc.set).not.toHaveBeenCalled();
+    });
+
+    it('should create session if token was issued after logout', async () => {
+      // Mock logout record exists but token was issued after
+      const loggedOutAt = new Date();
+      const tokenIssuedAt = new Date(loggedOutAt.getTime() + 1000); // 1 second after logout
+
+      mockLogoutDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          loggedOutAt: { toDate: () => loggedOutAt },
+          expiresAt: { toDate: () => new Date(loggedOutAt.getTime() + 3600000) }, // 1 hour TTL, still valid
+        }),
+      });
+
+      // Mock Firestore to return no document (session doesn't exist)
+      mockDoc.get.mockResolvedValue({
+        exists: false,
+      });
+
+      const wasCreated = await sessionService.ensureSession('user1', tokenIssuedAt);
+      expect(wasCreated).toBe(true);
+      expect(cache.get('user1')).toBeTruthy();
+      expect(mockDoc.set).toHaveBeenCalled();
+    });
+
+    it('should work without tokenIssuedAt parameter (backward compatibility)', async () => {
+      // Mock Firestore to return no document (session doesn't exist)
+      mockDoc.get.mockResolvedValue({
+        exists: false,
+      });
+
+      const wasCreated = await sessionService.ensureSession('user1');
+      expect(wasCreated).toBe(true);
+      expect(cache.get('user1')).toBeTruthy();
       expect(mockDoc.set).toHaveBeenCalled();
     });
   });
@@ -257,7 +421,7 @@ describe('SessionService', () => {
   });
 
   describe('clearSession', () => {
-    it('should clear cache and delete from Firestore', async () => {
+    it('should clear cache, store logout timestamp, and delete from Firestore', async () => {
       const session: SessionInfo = {
         userId: 'user1',
         createdAt: new Date(),
@@ -270,6 +434,84 @@ describe('SessionService', () => {
 
       expect(cache.get('user1')).toBeNull();
       expect(mockDoc.delete).toHaveBeenCalled();
+      // Verify logout timestamp was stored
+      expect(mockFirestore.collection).toHaveBeenCalledWith('user_logouts');
+      expect(mockLogoutDoc.set).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'user1',
+          loggedOutAt: expect.any(Date),
+          expiresAt: expect.any(Date),
+        }),
+      );
+    });
+  });
+
+  describe('wasTokenIssuedBeforeLogout', () => {
+    it('should return false if no logout record exists', async () => {
+      mockLogoutDoc.get.mockResolvedValue({
+        exists: false,
+      });
+
+      const tokenIssuedAt = new Date();
+      const wasIssuedBeforeLogout = await sessionService.wasTokenIssuedBeforeLogout('user1', tokenIssuedAt);
+
+      expect(wasIssuedBeforeLogout).toBe(false);
+    });
+
+    it('should still check token validity even if logout record has expired (TTL is only for cleanup)', async () => {
+      const loggedOutAt = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
+      const tokenIssuedAt = new Date(loggedOutAt.getTime() - 1000); // 1 second before logout
+      
+      // Logout record exists but has expired (for cleanup purposes)
+      mockLogoutDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          loggedOutAt: { toDate: () => loggedOutAt },
+          expiresAt: { toDate: () => new Date(loggedOutAt.getTime() + 3600000) }, // 1 hour TTL, expired
+        }),
+      });
+
+      // Token was issued before logout, so it should be rejected even though logout record expired
+      const wasIssuedBeforeLogout = await sessionService.wasTokenIssuedBeforeLogout('user1', tokenIssuedAt);
+
+      expect(wasIssuedBeforeLogout).toBe(true);
+    });
+
+    it('should return true if token was issued before logout', async () => {
+      const loggedOutAt = new Date();
+      const tokenIssuedAt = new Date(loggedOutAt.getTime() - 1000); // 1 second before logout
+
+      mockLogoutDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          loggedOutAt: { toDate: () => loggedOutAt },
+          expiresAt: { toDate: () => new Date(loggedOutAt.getTime() + 3600000) }, // 1 hour TTL, still valid
+        }),
+      });
+
+      const wasIssuedBeforeLogout = await sessionService.wasTokenIssuedBeforeLogout('user1', tokenIssuedAt);
+
+      expect(wasIssuedBeforeLogout).toBe(true);
+    });
+
+    it('should return false if token was issued after logout', async () => {
+      const loggedOutAt = new Date();
+      const tokenIssuedAt = new Date(loggedOutAt.getTime() + 1000); // 1 second after logout
+
+      mockLogoutDoc.get.mockResolvedValue({
+        exists: true,
+        data: () => ({
+          userId: 'user1',
+          loggedOutAt: { toDate: () => loggedOutAt },
+          expiresAt: { toDate: () => new Date(loggedOutAt.getTime() + 3600000) }, // 1 hour TTL, still valid
+        }),
+      });
+
+      const wasIssuedBeforeLogout = await sessionService.wasTokenIssuedBeforeLogout('user1', tokenIssuedAt);
+
+      expect(wasIssuedBeforeLogout).toBe(false);
     });
   });
 });
