@@ -1,6 +1,6 @@
 {
   "name": "@rapidraptor/auth-shared",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared types and constants for @rapidraptor/auth",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -25,4 +25,3 @@
     "typescript": "^5.4.5"
   }
 }
-
