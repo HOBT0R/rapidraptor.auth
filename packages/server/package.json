@@ -4,6 +4,10 @@
   "description": "Server-side authentication library for Node.js/Express applications",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HOBT0R/rapidraptor.auth.git"
+  },
   "files": [
     "dist"
   ],
