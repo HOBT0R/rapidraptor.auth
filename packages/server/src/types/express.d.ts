@@ -1,4 +1,3 @@
-import type { Request } from 'express';
 import type { Logger } from './middleware.js';
 
 declare global {

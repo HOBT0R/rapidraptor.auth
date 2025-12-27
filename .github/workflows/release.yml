@@ -13,7 +13,7 @@ on:
 
 jobs:
   release:
-    name: Release
+    name: Create Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,104 +25,72 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
       
-      - name: Check for skip release
-        id: skip-check
-        run: |
-          if echo "${{ github.event.head_commit.message }}" | grep -qE '\[skip release\]|\[no version\]'; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "Skipping release due to [skip release] or [no version] in commit message"
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
-      
-      - name: Check if version tag exists
-        if: steps.skip-check.outputs.skip == 'false'
-        id: tag-check
-        run: |
-          # Get current version from package.json
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          TAG_NAME="v${CURRENT_VERSION}"
-          
-          # Check if tag already exists
-          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag $TAG_NAME already exists, skipping release"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "Tag $TAG_NAME does not exist, proceeding with release"
-          fi
-      
       - name: Setup Node.js
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
       
       - name: Install dependencies
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
         run: npm ci
       
-      - name: Bump version
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
-        id: version
+      - name: Check if release needed
+        id: check-release
         run: |
-          node scripts/auto-version.js
-          # Read new version from package.json
-          NEW_VERSION=$(node -p "require('./package.json').version")
-          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "version_tag=v${NEW_VERSION}" >> $GITHUB_OUTPUT
-          echo "Bumped version to ${NEW_VERSION}"
+          # Get current version from package.json
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          
+          # Check if a tag already exists for current version (handle both v0.2.0 and v.0.2.0 formats)
+          TAG_EXISTS=false
+          if git rev-parse "v${CURRENT_VERSION}" >/dev/null 2>&1; then
+            TAG_EXISTS=true
+            echo "Found tag: v${CURRENT_VERSION}"
+          elif git rev-parse "v.${CURRENT_VERSION}" >/dev/null 2>&1; then
+            TAG_EXISTS=true
+            echo "Found tag: v.${CURRENT_VERSION} (malformed, should be v${CURRENT_VERSION})"
+          fi
+          
+          if [ "$TAG_EXISTS" = "true" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "✅ Tag already exists for version ${CURRENT_VERSION}, skipping release..."
+            echo "ℹ️  If tag format is incorrect (v.X.Y.Z), you may want to fix it manually"
+            exit 0
+          fi
+          
+          # Check if the last commit is already a release commit
+          LAST_COMMIT_MSG=$(git log -1 --pretty=%B)
+          LAST_COMMIT_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD)
+          
+          # Skip if last commit is a release commit
+          if echo "$LAST_COMMIT_MSG" | grep -qE "chore: release|chore\(release\)"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "✅ Last commit is already a release commit, skipping..."
+            exit 0
+          fi
+          
+          # Skip if only CHANGELOG.md and package.json files changed (likely a release commit)
+          if echo "$LAST_COMMIT_FILES" | grep -q "CHANGELOG.md" && \
+             echo "$LAST_COMMIT_FILES" | grep -q "package.json" && \
+             [ $(echo "$LAST_COMMIT_FILES" | wc -l) -le 10 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "✅ Last commit appears to be a release commit (only version files changed), skipping..."
+            exit 0
+          fi
+          
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "📦 Creating new release (current version: ${CURRENT_VERSION})..."
       
-      - name: Build packages
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
-        run: npm run build
-      
-      - name: Run smoke tests
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+      - name: Create Release
+        if: steps.check-release.outputs.skip == 'false'
         run: |
-          npm run build:shared
-          npm test
+          npm run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Configure Git
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
+      - name: Push Release
+        if: steps.check-release.outputs.skip == 'false'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-      
-      - name: Commit version changes
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
-        run: |
-          git add package.json packages/*/package.json
-          git commit -m "chore: bump version to ${{ steps.version.outputs.new_version }}"
-          git push origin main
-      
-      - name: Create and push tag
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
-        run: |
-          git tag ${{ steps.version.outputs.version_tag }}
-          git push origin ${{ steps.version.outputs.version_tag }}
-      
-      - name: Publish to npm
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false' && secrets.NPM_TOKEN != ''
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd packages/shared && npm publish --access public
-          cd ../client && npm publish --access public
-          cd ../server && npm publish --access public
-      
-      - name: Create GitHub Release
-        if: steps.skip-check.outputs.skip == 'false' && steps.tag-check.outputs.exists == 'false'
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ steps.version.outputs.version_tag }}
-          name: Release ${{ steps.version.outputs.version_tag }}
-          body: |
-            ## Changes in ${{ steps.version.outputs.version_tag }}
-            
-            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
-          draft: false
-          prerelease: false
+          git push --follow-tags origin main
 

@@ -69,14 +69,14 @@ export async function initializeFirebaseAdmin(): Promise<void> {
   // Environment variables take precedence over file-based credentials
   const envCredentials = getCredentialsFromEnv();
   const fileCredentials = getCredentialsFromFile();
-  
+
   // Warn if both are set (they might conflict)
   if (envCredentials && fileCredentials) {
     console.warn(
       'Both environment variables and service account file are set. Environment variables will be used.',
     );
   }
-  
+
   const credentials = envCredentials || fileCredentials;
 
   if (!credentials) {

@@ -59,14 +59,14 @@ export class SessionService {
   async validateSession(userId: string): Promise<SessionValidationStatus> {
     // Check cache first
     const cachedSession = this.cache.get(userId);
-    
+
     // Step 1: Check for userId mismatch (data integrity issue)
     if (cachedSession && cachedSession.userId !== userId) {
       // Data integrity issue - invalidate cache entry
       this.cache.clear(userId);
       return SessionValidationStatus.DATA_INTEGRITY_ERROR;
     }
-    
+
     // Step 2: Check if cached session is valid
     if (cachedSession && !this.cache.isExpired(userId)) {
       // Cached session is valid and userId matches
@@ -117,7 +117,7 @@ export class SessionService {
   async sessionExists(userId: string): Promise<boolean> {
     const docRef = this.firestore.collection(this.collectionName).doc(userId);
     const doc = await docRef.get();
-    
+
     if (!doc.exists) {
       return false;
     }
@@ -131,7 +131,7 @@ export class SessionService {
    * Ensure session exists (idempotent - creates if doesn't exist)
    * Returns true if session was created, false if it already existed and is valid
    * Handles data integrity issues by overwriting with a new session
-   * 
+   *
    * @param userId - The user ID
    * @param tokenIssuedAt - Optional JWT token issued-at timestamp for revocation check
    * @throws TokenRevokedError if token was issued before logout (when tokenIssuedAt is provided)
@@ -148,7 +148,7 @@ export class SessionService {
 
     // Check session validation status
     const status = await this.validateSession(userId);
-    
+
     if (status === SessionValidationStatus.VALID) {
       return false; // Session already existed and is valid
     }
@@ -285,7 +285,7 @@ export class SessionService {
     // Load into cache
     for (const doc of snapshot.docs) {
       const data = doc.data() as FirestoreSessionDocument;
-      
+
       // SECURITY: Verify session userId matches document ID (data integrity check)
       // Skip sessions with mismatched userId (data corruption)
       if (data.userId !== doc.id) {
@@ -294,14 +294,14 @@ export class SessionService {
         );
         continue;
       }
-      
+
       const session = this.parseFirestoreDocument(data);
       this.cache.set(session.userId, session);
     }
 
     // Cleanup expired sessions (lazy deletion)
     const expiredSnapshot = await collection.where('expiresAt', '<=', now).get();
-    
+
     if (expiredSnapshot.empty) {
       return; // No expired sessions to clean up
     }

@@ -307,38 +307,96 @@ const sessionService = createSessionService(firestore, {
 
 See the [Solution Design](./solution-design-session-management.md) and [Technical Design](./technical-design-session-management.md) documents for detailed architecture and implementation details.
 
-## Release Process
+## Development
 
-This library uses automated versioning and releases. When a PR is merged to the `main` branch:
+### Git Hooks
 
-1. **CI checks run** - All tests (unit + integration) must pass
-2. **Version bump** - Patch version is automatically incremented (e.g., 0.1.0 → 0.1.1)
-3. **Git tag** - A version tag is created and pushed (e.g., `v0.1.1`)
-4. **npm publish** - All packages are published to npm (optional, requires NPM_TOKEN secret)
-5. **GitHub release** - A GitHub release is created with changelog
+This repository uses [husky](https://typicode.github.io/husky/) to run automated checks:
 
-**Note**: npm publishing is optional. If `NPM_TOKEN` is not configured, the workflow will skip npm publishing and only create git tags and GitHub releases.
+#### Pre-commit Hook
 
-### Manual Version Bumps
+Runs before every commit:
+- **Linting**: Automatically fixes linting issues with `npm run lint:fix`
+- **Tests**: Runs unit tests to ensure nothing is broken
 
-For major or minor version bumps:
+If tests fail or there are unfixable linting errors, the commit will be blocked.
 
+To skip hooks (not recommended):
 ```bash
-# Bump minor version
-npm run version:bump minor
-
-# Bump major version
-npm run version:bump major
-
-# Set specific version
-npm run version:bump 1.2.3
+git commit --no-verify
 ```
 
-Then commit and push the changes. The automated release workflow will handle the rest.
+### Commit Message Format
 
-### Skipping a Release
+This project uses [Conventional Commits](https://www.conventionalcommits.org/) for automatic versioning:
 
-To skip versioning for a merge, include `[skip release]` or `[no version]` in the commit message.
+- `feat:` - New features (bumps minor version)
+- `fix:` - Bug fixes (bumps patch version)
+- `perf:` - Performance improvements (bumps patch version)
+- `BREAKING CHANGE:` or `feat!:` - Breaking changes (bumps major version)
+
+Examples:
+```bash
+feat: add new authentication method
+fix: resolve token refresh issue
+feat!: change API signature (BREAKING CHANGE)
+```
+
+## Release Process
+
+This project uses [standard-version](https://github.com/conventional-changelog/standard-version) for automated versioning, similar to Nebula for Gradle projects.
+
+### Automated Releases
+
+**Releases are automatically created when you merge a PR to `main`:**
+
+1. **Merge your PR to `main`** (using conventional commit messages)
+2. **GitHub Actions automatically**:
+   - Analyzes commit messages since last release
+   - Determines version bump (patch/minor/major) based on conventional commits
+   - Updates version in all `package.json` files (root + all packages)
+   - Updates `CHANGELOG.md` with new changes
+   - Creates a git tag (e.g., `v0.1.1`)
+   - Commits everything with message "chore: release v0.1.1"
+   - Pushes the release commit and tag back to `main`
+
+3. **Create GitHub Release** (optional):
+   - Go to GitHub Releases
+   - Click "Create a new release"
+   - Select the tag that was automatically created
+   - The changelog is already populated from `CHANGELOG.md`
+
+### Manual Release (if needed)
+
+If you need to create a release manually (e.g., GitHub Actions is unavailable):
+
+1. **Checkout main and pull latest**:
+   ```bash
+   git checkout main
+   git pull origin main
+   ```
+
+2. **Run release command**:
+   ```bash
+   npm run release        # Auto-determines version from commits
+   npm run release:patch  # Force patch version (0.1.0 → 0.1.1)
+   npm run release:minor  # Force minor version (0.1.0 → 0.2.0)
+   npm run release:major # Force major version (0.1.0 → 1.0.0)
+   ```
+
+3. **Push the release**:
+   ```bash
+   git push --follow-tags origin main
+   ```
+
+### Version Bump Rules
+
+Based on commit messages since last release:
+- **Patch** (0.1.0 → 0.1.1): `fix:`, `perf:`, `refactor:` (non-breaking)
+- **Minor** (0.1.0 → 0.2.0): `feat:` (new features)
+- **Major** (0.1.0 → 1.0.0): `BREAKING CHANGE:` or `feat!:` (breaking changes)
+
+If no conventional commits are found, defaults to patch version.
 
 ### Version Management
 

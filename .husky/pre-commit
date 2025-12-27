@@ -1,0 +1,5 @@
+echo "🔍 Running linter..."
+npm run lint:fix
+
+echo "🧪 Running tests..."
+npm test -- --run

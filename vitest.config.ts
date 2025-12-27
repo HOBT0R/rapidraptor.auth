@@ -6,7 +6,7 @@ export default defineConfig({
     environment: 'node',
     // Include all test files by default, but exclude integration tests from regular runs
     // Integration tests are run separately via test:integration script
-    include: process.env.VITEST_INTEGRATION 
+    include: process.env.VITEST_INTEGRATION
       ? ['__tests__/**/*.test.ts']
       : ['packages/**/*.test.ts'],
     exclude: ['node_modules/**'],

@@ -1,21 +1,21 @@
 /**
  * Firebase Emulator Setup for Integration Tests
- * 
+ *
  * This module configures Firebase Admin SDK to connect to the Firebase emulator
  * for integration testing. In emulator mode, Firebase Admin doesn't require real
  * credentials - it automatically connects to the local emulator when the appropriate
  * environment variables are set.
- * 
+ *
  * This setup mirrors production configuration patterns, but uses emulator endpoints
  * instead of production Firebase services. In production, you would:
  * 1. Set FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, and FIREBASE_CLIENT_EMAIL
  * 2. Or set GOOGLE_APPLICATION_CREDENTIALS to point to a service account file
- * 
+ *
  * For emulator mode (testing), you only need:
  * - FIREBASE_AUTH_EMULATOR_HOST (e.g., "localhost:9099")
  * - FIRESTORE_EMULATOR_HOST (e.g., "localhost:8080")
  * - FIREBASE_PROJECT_ID (can be any test project ID, e.g., "test-project")
- * 
+ *
  * @module __tests__/integration/firebase-setup
  */
 
@@ -31,24 +31,24 @@ const DEFAULT_TEST_PROJECT_ID = 'test-project';
 
 /**
  * Initialize Firebase Admin SDK for emulator testing
- * 
+ *
  * This function sets up Firebase Admin to connect to the local emulator.
  * Unlike production initialization, emulator mode doesn't require credentials
  * because the emulator doesn't perform real authentication checks.
- * 
+ *
  * The emulator automatically uses the environment variables:
  * - FIREBASE_AUTH_EMULATOR_HOST: Points to Auth emulator (default: localhost:9099)
  * - FIRESTORE_EMULATOR_HOST: Points to Firestore emulator (default: localhost:8080)
- * 
+ *
  * @throws {Error} If emulator environment variables are not set
- * 
+ *
  * @example
  * ```typescript
  * // Set environment variables before calling
  * process.env.FIREBASE_AUTH_EMULATOR_HOST = 'localhost:9099';
  * process.env.FIRESTORE_EMULATOR_HOST = 'localhost:8080';
  * process.env.FIREBASE_PROJECT_ID = 'test-project';
- * 
+ *
  * await initializeFirebaseEmulator();
  * ```
  */
@@ -85,13 +85,13 @@ export async function initializeFirebaseEmulator(): Promise<void> {
 
 /**
  * Get Firebase Auth instance for emulator
- * 
+ *
  * Returns the Auth instance connected to the emulator.
  * This is used for creating test users and managing authentication in tests.
- * 
+ *
  * @returns {Auth} Firebase Auth instance connected to emulator
  * @throws {Error} If Firebase Admin is not initialized
- * 
+ *
  * @example
  * ```typescript
  * const auth = getEmulatorAuth();
@@ -109,13 +109,13 @@ export function getEmulatorAuth(): Auth {
 
 /**
  * Get Firestore instance for emulator
- * 
+ *
  * Returns the Firestore instance connected to the emulator.
  * This is used for reading/writing session data in tests.
- * 
+ *
  * @returns {Firestore} Firestore instance connected to emulator
  * @throws {Error} If Firebase Admin is not initialized
- * 
+ *
  * @example
  * ```typescript
  * const firestore = getEmulatorFirestore();
@@ -133,9 +133,9 @@ export function getEmulatorFirestore(): Firestore {
 
 /**
  * Get the test project ID
- * 
+ *
  * Returns the project ID being used for testing.
- * 
+ *
  * @returns {string} Project ID
  */
 export function getTestProjectId(): string {

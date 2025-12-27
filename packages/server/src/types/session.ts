@@ -6,4 +6,3 @@ import type { SessionInfo } from '@rapidraptor/auth-shared';
  */
 export type SessionMap = Map<string, SessionInfo>;
 
-
