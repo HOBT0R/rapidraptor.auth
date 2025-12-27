@@ -57,3 +57,73 @@ If you need a personal access token (not recommended, GITHUB_TOKEN works fine):
 
 **Note**: The default `GITHUB_TOKEN` is sufficient for this workflow.
 
+## npm Publishing Setup
+
+This project uses npm's **Trusted Publishing** feature to automatically publish packages to npmjs.com after releases are created. This eliminates the need for long-lived npm tokens.
+
+### Prerequisites
+
+1. **Create npm Organization** (if it doesn't exist):
+   - Go to https://www.npmjs.com/org/create
+   - Create an organization named `rapidraptor`
+   - The scope `@rapidraptor` will be available for your organization
+
+2. **Initial Manual Publish** (one-time only):
+   - Packages must exist on npm before Trusted Publishing can be configured
+   - Log in to npm: `npm login`
+   - Build packages: `npm run build`
+   - Publish: `node scripts/publish.js`
+   - Verify packages are published on npmjs.com
+
+### Configure Trusted Publishing
+
+After the initial publish, configure Trusted Publishing for each package:
+
+1. **For each package** (`@rapidraptor/auth-shared`, `@rapidraptor/auth-client`, `@rapidraptor/auth-server`):
+   - Go to the package's Settings page on npmjs.com
+   - Find the "Trusted Publishers" section
+   - Click "Add Trusted Publisher"
+   - Select "GitHub Actions"
+   - Provide:
+     - **Organization or User**: Your GitHub username or organization (e.g., `HOBT0R`)
+     - **Repository**: `rapidraptor.auth` (or your actual repo name)
+     - **Workflow Filename**: `release.yml`
+   - Click "Set up connection"
+
+2. **Verify setup**:
+   - The workflow already has `id-token: write` permission (required for OIDC)
+   - The workflow uses `actions/setup-node@v4` with `registry-url: 'https://registry.npmjs.org'` (enables OIDC)
+   - Packages are published with `--provenance` flag for enhanced security
+
+### How It Works
+
+1. When a release is created (via the release workflow), packages are automatically:
+   - Built
+   - Published to npmjs.com in the correct order (shared → client → server)
+   - Published with provenance statements linking to the GitHub repository
+
+2. **No secrets required**: Trusted Publishing uses OpenID Connect (OIDC) for authentication, eliminating the need for npm tokens.
+
+### Benefits
+
+- ✅ No long-lived tokens to manage or rotate
+- ✅ More secure (uses OpenID Connect)
+- ✅ Automatically authenticated via GitHub Actions
+- ✅ Supports provenance statements for supply chain security
+
+### Troubleshooting
+
+**Publishing fails with "Scope not found"**:
+- Ensure the npm organization `rapidraptor` exists
+- Verify you're logged in as a member of that organization
+
+**Publishing fails with authentication errors**:
+- Verify Trusted Publishing is configured for each package
+- Check that the workflow filename matches (`release.yml`)
+- Ensure the repository name matches your GitHub repository
+
+**Packages not publishing automatically**:
+- Check that packages exist on npm (initial manual publish completed)
+- Verify Trusted Publishing is configured for all three packages
+- Check workflow logs in the Actions tab for error messages
+
