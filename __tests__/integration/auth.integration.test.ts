@@ -1,18 +1,18 @@
 /**
  * Integration Tests for @rapidraptor/auth Library
- * 
+ *
  * These tests serve as both validation and documentation, demonstrating
  * how to properly implement the authentication library in a real application.
- * 
+ *
  * Each test shows:
  * - How to set up the library components
  * - Expected behavior and responses
  * - Error handling patterns
  * - Best practices for integration
- * 
+ *
  * These tests use the Firebase emulator to provide a realistic testing
  * environment without requiring production Firebase credentials.
- * 
+ *
  * @module __tests__/integration/auth.integration.test
  */
 
@@ -36,7 +36,7 @@ import { ERROR_CODES } from '@rapidraptor/auth-shared';
 
 /**
  * Integration tests for authentication and session management
- * 
+ *
  * These tests validate the complete flow from user login through session
  * management, including edge cases like expiration and logout.
  */
@@ -48,11 +48,11 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Global setup: Initialize Firebase emulator and create test server
-   * 
+   *
    * This runs once before all tests. It:
    * 1. Sets up the Firebase emulator connection
    * 2. Creates the Express test server with auth middleware
-   * 
+   *
    * In production, you would do similar setup in your application's
    * initialization code.
    */
@@ -80,7 +80,7 @@ describe('Auth Integration Tests', () => {
     if (firestoreSync) {
       firestoreSync.stopPeriodicSync();
     }
-    
+
     // Clean up any remaining test data
     if (testUser) {
       await cleanupTestUser(testUser.uid);
@@ -89,7 +89,7 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test setup: Create a fresh test user for each test
-   * 
+   *
    * This ensures test isolation - each test starts with a clean user
    * that has no existing session.
    */
@@ -103,7 +103,7 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test teardown: Clean up test user and session data
-   * 
+   *
    * This ensures no test data leaks between tests.
    */
   afterEach(async () => {
@@ -119,14 +119,14 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 1: Login and Token Creation
-   * 
+   *
    * Scenario: User logs in via Firebase Auth and makes their first API request
-   * 
+   *
    * This test demonstrates:
    * - How sessions are automatically created on first authenticated request
    * - The flow from client login to server session creation
    * - What developers should expect when a new user makes their first API call
-   * 
+   *
    * Expected behavior:
    * 1. User logs in (gets ID token from Firebase Auth)
    * 2. User makes first API request with token
@@ -173,14 +173,14 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 2: Create New User Session
-   * 
+   *
    * Scenario: User makes their first API request after login
-   * 
+   *
    * This test demonstrates:
    * - How the library automatically creates sessions for new users
    * - That session creation is idempotent (safe to call multiple times)
    * - The session structure and initial values
-   * 
+   *
    * Expected behavior:
    * 1. First request creates session
    * 2. Session has correct initial values (createdAt, lastActivityAt, expiresAt)
@@ -234,19 +234,19 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 3a: Update Last Activity Time (Cache Behavior)
-   * 
+   *
    * Scenario: User makes multiple API requests in quick succession
-   * 
+   *
    * This test demonstrates:
    * - How the library updates the cache immediately on each request
    * - That cache updates happen synchronously (no throttling)
    * - That subsequent requests use the updated cache values
-   * 
+   *
    * Expected behavior:
    * 1. Cache is updated immediately (no waiting for Firestore)
    * 2. Multiple rapid requests all succeed (cache is being used)
    * 3. Session remains valid across rapid requests (cache updates extend expiration)
-   * 
+   *
    * Note: This tests the cache layer, not Firestore writes (which are throttled)
    */
   it('should update last activity in cache immediately on subsequent requests', async () => {
@@ -259,13 +259,13 @@ describe('Auth Integration Tests', () => {
     // Cache updates happen immediately, so all requests should succeed
     // even though Firestore writes are throttled
     const requestCount = 5;
-    
+
     for (let i = 0; i < requestCount; i++) {
       // Small delay between requests to ensure timestamps are different
       if (i > 0) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      
+
       // Each request should succeed - cache is updated immediately
       // This demonstrates that cache updates are synchronous and don't wait for Firestore
       await request(app).get('/test').set('Authorization', `Bearer ${token}`).expect(200);
@@ -283,20 +283,20 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 3b: Update Last Activity Time (Firestore Behavior)
-   * 
+   *
    * Scenario: User makes API requests and we verify Firestore is updated
-   * 
+   *
    * This test demonstrates:
    * - How Firestore writes are throttled (not immediate)
    * - That updates eventually make it to Firestore
    * - That createdAt is preserved when lastActivityAt is updated
-   * 
+   *
    * Expected behavior:
    * 1. First request creates session in Firestore
    * 2. Second request updates cache immediately, queues Firestore write
    * 3. After throttle period, Firestore write is flushed
    * 4. createdAt remains unchanged, lastActivityAt is updated
-   * 
+   *
    * Note: This tests the Firestore persistence layer, not the cache
    */
   it('should eventually write last activity update to Firestore after throttle period', async () => {
@@ -315,7 +315,7 @@ describe('Auth Integration Tests', () => {
     const initialCreatedAt = sessionDoc1.data()!.createdAt.toDate();
     const initialLastActivity = sessionDoc1.data()!.lastActivityAt.toDate();
     const initialExpiresAt = sessionDoc1.data()!.expiresAt.toDate();
-    
+
     // Verify initial state: createdAt and lastActivityAt should be the same initially
     expect(initialCreatedAt.getTime()).toBe(initialLastActivity.getTime());
 
@@ -332,7 +332,7 @@ describe('Auth Integration Tests', () => {
     // Wait for the throttle period to ensure the periodic sync has had a chance to run
     // Then manually flush to ensure the write happens (for test reliability)
     await new Promise((resolve) => setTimeout(resolve, testConfig.firestoreWriteThrottleMs + 500));
-    
+
     // Manually flush the queue to ensure writes are committed
     // In production, this happens automatically via periodic sync
     // For tests, we flush manually to ensure deterministic behavior
@@ -359,7 +359,7 @@ describe('Auth Integration Tests', () => {
       testConfig.firestoreCollectionName,
       testUser!.uid,
     );
-    
+
     const sessionData = sessionDoc2.data()!;
     const updatedLastActivity = sessionData.lastActivityAt.toDate();
     const updatedExpiresAt = sessionData.expiresAt.toDate();
@@ -368,12 +368,12 @@ describe('Auth Integration Tests', () => {
     // Verify the update was written to Firestore
     // Check that lastActivityAt was updated
     expect(updatedLastActivity.getTime()).toBeGreaterThan(initialLastActivity.getTime());
-    
+
     // Verify createdAt was NOT changed in Firestore
     // This is critical - createdAt should never change after initial creation
     // This also proves we're writing the complete session, not just updating fields
     expect(updatedCreatedAt.getTime()).toBe(initialCreatedAt.getTime());
-    
+
     // Verify expiresAt was extended in Firestore
     expect(updatedExpiresAt.getTime()).toBeGreaterThan(initialExpiresAt.getTime());
 
@@ -386,14 +386,14 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 4: Expired User Session
-   * 
+   *
    * Scenario: User's session expires due to inactivity
-   * 
+   *
    * This test demonstrates:
    * - How expired sessions are detected and rejected
    * - The error response format for expired sessions
    * - That users must log out and log back in after expiration
-   * 
+   *
    * Expected behavior:
    * 1. Session expires after inactivity timeout
    * 2. Requests with expired session return 401 SESSION_EXPIRED
@@ -432,14 +432,14 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 5: Block Creating New Sessions with Old Token
-   * 
+   *
    * Scenario: User logs out, then tries to use a token issued before logout
-   * 
+   *
    * This test demonstrates:
    * - Token revocation mechanism
    * - How the library prevents reuse of old tokens after logout
    * - The security feature that prevents token reuse
-   * 
+   *
    * Expected behavior:
    * 1. User gets token and creates session
    * 2. User logs out (session cleared)
@@ -478,14 +478,14 @@ describe('Auth Integration Tests', () => {
 
   /**
    * Test 6: Log Out and Delete User Session
-   * 
+   *
    * Scenario: User explicitly logs out
-   * 
+   *
    * This test demonstrates:
    * - How logout clears the user session
    * - That logout is idempotent (safe to call multiple times)
    * - The logout flow and response
-   * 
+   *
    * Expected behavior:
    * 1. User has active session
    * 2. User calls logout endpoint
@@ -525,7 +525,7 @@ describe('Auth Integration Tests', () => {
       200, // Check every 200ms
       2000, // Wait up to 2 seconds for deletion
     );
-    
+
     // Double-check with a direct read
     const sessionAfter = await readFirestoreWithRetry(
       testConfig.firestoreCollectionName,

@@ -1,6 +1,6 @@
 {
   "name": "@rapidraptor/auth-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Client-side authentication library for React applications",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -37,4 +37,3 @@
     "vitest": "^1.6.1"
   }
 }
-

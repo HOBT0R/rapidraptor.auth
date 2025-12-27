@@ -2,7 +2,7 @@
  * Interface for user token verifier
  * Implementations should verify JWT tokens (signature, expiration, issuer, audience)
  * and return the user information from the token payload.
- * 
+ *
  * This is a generic interface that can be implemented by any project using this library.
  * The implementation is provided via dependency injection to createAuthMiddleware().
  */

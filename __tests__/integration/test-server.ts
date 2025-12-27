@@ -1,34 +1,31 @@
 /**
  * Test Express Server with Authentication Middleware
- * 
+ *
  * This module creates a complete Express server setup that demonstrates how to
  * integrate the @rapidraptor/auth library in a real application. It shows:
- * 
+ *
  * 1. How to initialize Firebase Admin
  * 2. How to configure the token verifier
  * 3. How to set up the session service
  * 4. How to apply auth middleware to routes
  * 5. How to set up logout handler
- * 
+ *
  * This server configuration mirrors what developers would implement in production,
  * but uses shorter timeouts for faster testing.
- * 
+ *
  * @module __tests__/integration/test-server
  */
 
 import express, { type Express, type Request, type Response } from 'express';
 import {
-  createSessionService,
   createAuthMiddleware,
   createLogoutHandler,
-  JoseTokenVerifier,
   SessionCache,
   FirestoreSync,
   SessionService,
 } from '@rapidraptor/auth-server';
 import {
   getEmulatorFirestore,
-  getTestProjectId,
   initializeFirebaseEmulator,
 } from './firebase-setup.js';
 import { DEFAULTS } from '@rapidraptor/auth-shared';
@@ -58,7 +55,7 @@ const TEST_CONFIG = {
 
 /**
  * Production configuration example (commented for reference)
- * 
+ *
  * In production, you would use:
  * ```typescript
  * const PRODUCTION_CONFIG = {
@@ -72,27 +69,27 @@ const TEST_CONFIG = {
 
 /**
  * Create and configure Express server with authentication
- * 
+ *
  * This function demonstrates the complete server setup pattern that developers
  * should follow in their applications:
- * 
+ *
  * 1. Initialize Firebase Admin (for Firestore access)
  * 2. Create SessionService (manages user sessions)
  * 3. Create TokenVerifier (verifies JWT tokens)
  * 4. Create Auth Middleware (protects routes)
  * 5. Create Logout Handler (handles logout requests)
  * 6. Set up routes
- * 
+ *
  * @returns {Promise<{ app: Express; firestoreSync: FirestoreSync }>} Configured Express server and FirestoreSync instance
- * 
+ *
  * @example
  * ```typescript
  * // In your application's server setup
  * const { app, firestoreSync } = await createTestServer();
- * 
+ *
  * // Or in production:
  * // const app = await createProductionServer();
- * 
+ *
  * app.listen(3000, () => {
  *   console.log('Server running on port 3000');
  * });
@@ -120,7 +117,7 @@ export async function createTestServer(): Promise<{ app: Express; firestoreSync:
     throttleMs,
     TEST_CONFIG.firestoreCollectionName,
   );
-  
+
   // Start periodic Firestore sync for throttled writes
   // This ensures queued writes are flushed periodically
   // In production, this would typically be started when the server starts
@@ -138,13 +135,13 @@ export async function createTestServer(): Promise<{ app: Express; firestoreSync:
 
   // Step 3: Create Token Verifier
   // This verifies JWT tokens from Firebase Auth
-  // 
+  //
   // IMPORTANT: For emulator testing, we use a custom verifier that decodes tokens
   // without full cryptographic verification because:
   // 1. The Firebase Auth emulator doesn't expose a JWKS endpoint
   // 2. Token verification is tested in unit tests (joseTokenVerifier.test.ts)
   // 3. Integration tests focus on session management flow, not token verification
-  // 
+  //
   // In production, you would use:
   // const tokenVerifier = new JoseTokenVerifier({
   //   jwksUri: 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
@@ -160,11 +157,11 @@ export async function createTestServer(): Promise<{ app: Express; firestoreSync:
       // In production, JoseTokenVerifier does full cryptographic verification
       const { decodeJwt } = await import('jose');
       const payload = decodeJwt(token);
-      
+
       if (!payload.sub) {
         throw new Error('Token missing sub claim');
       }
-      
+
       return {
         sub: payload.sub,
         email: payload.email as string | undefined,
@@ -224,9 +221,9 @@ export async function createTestServer(): Promise<{ app: Express; firestoreSync:
 
 /**
  * Get test configuration values
- * 
+ *
  * Useful for tests that need to know the configured timeouts.
- * 
+ *
  * @returns {typeof TEST_CONFIG} Test configuration
  */
 export function getTestConfig() {
@@ -235,9 +232,9 @@ export function getTestConfig() {
 
 /**
  * Get production default values for reference
- * 
+ *
  * This helps tests understand what production values would be.
- * 
+ *
  * @returns {typeof DEFAULTS} Production defaults
  */
 export function getProductionDefaults() {

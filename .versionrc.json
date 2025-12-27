@@ -1,0 +1,25 @@
+{
+  "types": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance Improvements" },
+    { "type": "refactor", "section": "Code Refactoring" },
+    { "type": "docs", "section": "Documentation", "hidden": false },
+    { "type": "style", "section": "Styles", "hidden": true },
+    { "type": "chore", "section": "Miscellaneous Chores", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "build", "section": "Build System", "hidden": true },
+    { "type": "ci", "section": "Continuous Integration", "hidden": true }
+  ],
+  "releaseCommitMessageFormat": "chore: release {{currentTag}}",
+  "bumpFiles": [
+    "package.json",
+    "packages/shared/package.json",
+    "packages/client/package.json",
+    "packages/server/package.json"
+  ],
+  "skip": {
+    "tag": false
+  }
+}
+

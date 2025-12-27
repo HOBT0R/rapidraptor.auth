@@ -461,7 +461,7 @@ describe('SessionService', () => {
     it('should still check token validity even if logout record has expired (TTL is only for cleanup)', async () => {
       const loggedOutAt = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2 hours ago
       const tokenIssuedAt = new Date(loggedOutAt.getTime() - 1000); // 1 second before logout
-      
+
       // Logout record exists but has expired (for cleanup purposes)
       mockLogoutDoc.get.mockResolvedValue({
         exists: true,
