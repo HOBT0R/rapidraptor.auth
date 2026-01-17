@@ -30,4 +30,4 @@ export type {
   FirestoreSessionDocument,
   FirestoreLogoutDocument,
 } from '@rapidraptor/auth-shared';
-export { SessionValidationStatus } from '@rapidraptor/auth-shared';
+export { SessionValidationStatus, ERROR_CODES } from '@rapidraptor/auth-shared';

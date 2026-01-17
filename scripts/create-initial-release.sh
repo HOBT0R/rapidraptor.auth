@@ -41,3 +41,8 @@ echo ""
 echo "Or use GitHub CLI:"
 echo "   gh release create ${TAG} --title 'Release ${TAG}' --notes 'Initial release of @rapidraptor/auth library'"
 
+
+
+
+
+
