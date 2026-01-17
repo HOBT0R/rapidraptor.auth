@@ -1,6 +1,7 @@
 {
   "name": "@rapidraptor/auth-shared",
   "version": "0.2.0",
+  "type": "module",
   "description": "Shared types and constants for @rapidraptor/auth",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,8 +15,11 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"

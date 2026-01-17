@@ -440,3 +440,8 @@ When adding new integration tests:
 4. Include setup/teardown for test isolation
 5. Update this README if adding new patterns
 
+
+
+
+
+
