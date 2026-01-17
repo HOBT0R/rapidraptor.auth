@@ -1,6 +1,7 @@
 {
   "name": "@rapidraptor/auth-server",
-  "version": "0.2.2",
+  "version": "0.2.3",
+  "type": "module",
   "description": "Server-side authentication library for Node.js/Express applications",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -14,8 +15,11 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
       "default": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public"
