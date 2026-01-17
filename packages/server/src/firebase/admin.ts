@@ -56,6 +56,9 @@ function getCredentialsFromFile(): FirebaseCredentials | null {
 /**
  * Initialize Firebase Admin SDK
  * Can be called multiple times safely (idempotent)
+ * 
+ * Supports emulator mode when FIREBASE_AUTH_EMULATOR_HOST and FIRESTORE_EMULATOR_HOST are set.
+ * In emulator mode, credentials are not required.
  */
 export async function initializeFirebaseAdmin(): Promise<void> {
   // Check if already initialized
@@ -65,7 +68,24 @@ export async function initializeFirebaseAdmin(): Promise<void> {
     return;
   }
 
-  // Try to get credentials from environment or file
+  // Check if emulator mode is enabled
+  const authEmulatorHost = process.env.FIREBASE_AUTH_EMULATOR_HOST;
+  const firestoreEmulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
+  const projectId = process.env.FIREBASE_PROJECT_ID || 'demo-project';
+
+  const isEmulatorMode = !!(authEmulatorHost || firestoreEmulatorHost);
+
+  if (isEmulatorMode) {
+    // Emulator mode: Initialize without credentials
+    // Firebase Admin SDK automatically connects to emulators when env vars are set
+    appInstance = initializeApp({
+      projectId,
+    });
+    firestoreInstance = getFirestore(appInstance);
+    return;
+  }
+
+  // Production mode: Try to get credentials from environment or file
   // Environment variables take precedence over file-based credentials
   const envCredentials = getCredentialsFromEnv();
   const fileCredentials = getCredentialsFromFile();
@@ -81,7 +101,7 @@ export async function initializeFirebaseAdmin(): Promise<void> {
 
   if (!credentials) {
     throw new Error(
-      'Firebase Admin credentials not found. Set FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, and FIREBASE_CLIENT_EMAIL environment variables, or set GOOGLE_APPLICATION_CREDENTIALS to point to a service account file.',
+      'Firebase Admin credentials not found. Set FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, and FIREBASE_CLIENT_EMAIL environment variables, or set GOOGLE_APPLICATION_CREDENTIALS to point to a service account file. For emulator mode, set FIREBASE_AUTH_EMULATOR_HOST and FIRESTORE_EMULATOR_HOST.',
     );
   }
 
