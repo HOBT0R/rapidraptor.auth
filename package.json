@@ -1,6 +1,6 @@
 {
   "name": "@rapidraptor/auth",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "Unified authentication library for session management and token expiration handling",
