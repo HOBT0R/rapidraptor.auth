@@ -1,11 +1,12 @@
 ---
 title: Solution Design - Session Management and Token Expiration
-version: 1.1
+version: 1.2
 status: Draft
-date: 2025-12-26
+date: 2026-02-21
 ---
 
 **Version History:**
+- **v1.2**: Independent session IDs — sessions use UUID document IDs; lookup by userId (fixes logout/re-login blocking)
 - **v1.1**: Added complete logout flow (server-side and client-side session clearing)
 - **v1.0**: Initial design for session management and token expiration
 
@@ -64,7 +65,7 @@ We will create a unified `@rapidraptor/auth` library that provides:
 ### Core Concepts
 
 **Session vs Token:**
-- **Session**: Server-side record of user activity, expires after 24 hours of inactivity
+- **Session**: Server-side record of user activity, expires after 24 hours of inactivity. Each session has an independent UUID (sessionId); sessions are associated with users via userId (from JWT), not derived from it. This allows logout then re-login to create a new session correctly.
 - **Token**: Short-lived JWT from Firebase (typically 1 hour), can be refreshed if session is valid
 
 **Two-Layer Authentication:**
@@ -165,9 +166,10 @@ The solution consists of three main components:
 - Firestore persistence for multi-instance deployments
 
 **Storage:**
-- **In-Memory Cache**: Fast lookup for active sessions (internal to Session Cache component)
+- **In-Memory Cache**: Fast lookup for active sessions, keyed by userId (internal to Session Cache component)
 - **Firestore**: Persistent storage for session data (accessed via Firestore Sync component)
-- **Collection**: `user_sessions/{userId}`
+- **Collection**: `user_sessions/{sessionId}` — document ID is an independent session ID (UUID), not userId
+- **Session document**: `{ sessionId, userId, createdAt, lastActivityAt, expiresAt }` — sessions are associated with users via `userId` (from JWT `sub`); lookup by query on `userId` and `expiresAt`
 
 #### 1.3 Shared Package (`/shared`)
 - **Types**: Common TypeScript interfaces (SessionInfo, ErrorResponse, etc.)

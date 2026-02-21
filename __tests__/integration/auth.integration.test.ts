@@ -22,12 +22,15 @@ import request from 'supertest';
 import {
   createTestUser,
   getAuthToken,
+  getAuthTokenAfterSignOut,
   waitForSessionExpiration,
+  waitForNoSessionsForUser,
   cleanupTestUser,
   setupTestEnvironment,
   readFirestoreWithRetry,
   ensureFirestoreWrite,
   waitForFirestoreCondition,
+  querySessionDocsByUserId,
   type TestUser,
 } from './test-utils.js';
 import { createTestServer, getTestConfig } from './test-server.js';
@@ -154,18 +157,15 @@ describe('Auth Integration Tests', () => {
     expect(response.body.user).toHaveProperty('email', testUser!.email);
     expect(response.body).toHaveProperty('message', 'Protected route accessed successfully');
 
-    // Step 4: Verify session was created in Firestore
-    // In production, you typically don't need to check this directly
-    // but it's useful for testing
-    // Use retry logic to handle eventual consistency
-    const sessionDoc = await readFirestoreWithRetry(
+    // Step 4: Verify session was created in Firestore (sessionId-based collection)
+    const sessionDocs = await querySessionDocsByUserId(
       testConfig.firestoreCollectionName,
       testUser!.uid,
     );
-
-    expect(sessionDoc.exists).toBe(true);
-    const sessionData = sessionDoc.data();
+    expect(sessionDocs.length).toBe(1);
+    const sessionData = sessionDocs[0].data();
     expect(sessionData).toHaveProperty('userId', testUser!.uid);
+    expect(sessionData).toHaveProperty('sessionId');
     expect(sessionData).toHaveProperty('createdAt');
     expect(sessionData).toHaveProperty('lastActivityAt');
     expect(sessionData).toHaveProperty('expiresAt');
@@ -197,14 +197,13 @@ describe('Auth Integration Tests', () => {
 
     expect(response1.body.user.sub).toBe(testUser!.uid);
 
-    // Verify session was created (use retry to handle eventual consistency)
-    const sessionDoc = await readFirestoreWithRetry(
+    // Verify session was created (sessionId-based collection)
+    const sessionDocs = await querySessionDocsByUserId(
       testConfig.firestoreCollectionName,
       testUser!.uid,
     );
-
-    expect(sessionDoc.exists).toBe(true);
-    const sessionData = sessionDoc.data()!;
+    expect(sessionDocs.length).toBe(1);
+    const sessionData = sessionDocs[0].data()!;
 
     // Verify session timestamps
     const createdAt = sessionData.createdAt.toDate();
@@ -307,10 +306,16 @@ describe('Auth Integration Tests', () => {
 
     const firestore = getEmulatorFirestore();
 
-    // Get initial session state from Firestore
+    // Get initial session state from Firestore (sessionId-based: query by userId)
+    const initialDocs = await querySessionDocsByUserId(
+      testConfig.firestoreCollectionName,
+      testUser!.uid,
+    );
+    expect(initialDocs.length).toBe(1);
+    const sessionId = initialDocs[0].id;
     const sessionDoc1 = await firestore
       .collection(testConfig.firestoreCollectionName)
-      .doc(testUser!.uid)
+      .doc(sessionId)
       .get();
     const initialCreatedAt = sessionDoc1.data()!.createdAt.toDate();
     const initialLastActivity = sessionDoc1.data()!.lastActivityAt.toDate();
@@ -339,25 +344,22 @@ describe('Auth Integration Tests', () => {
     await firestoreSync.batchSync();
 
     // Wait for the write to be visible in Firestore (eventual consistency)
-    // This ensures we're reading the updated value, not a stale cached value
     await ensureFirestoreWrite(
       testConfig.firestoreCollectionName,
-      testUser!.uid,
+      sessionId,
       (doc) => {
         if (!doc.exists) return false;
         const data = doc.data()!;
         const updatedLastActivity = data.lastActivityAt.toDate();
-        // Verify that lastActivityAt has been updated
         return updatedLastActivity.getTime() > initialLastActivity.getTime();
       },
-      testConfig.firestoreWriteThrottleMs * 2 + 2000, // Allow time for write + retries
+      testConfig.firestoreWriteThrottleMs * 2 + 2000,
     );
 
     // Now read from Firestore to verify the update
-    // Use retry logic to handle any remaining eventual consistency issues
     const sessionDoc2 = await readFirestoreWithRetry(
       testConfig.firestoreCollectionName,
-      testUser!.uid,
+      sessionId,
     );
 
     const sessionData = sessionDoc2.data()!;
@@ -499,12 +501,12 @@ describe('Auth Integration Tests', () => {
     // Create session
     await request(app).get('/test').set('Authorization', `Bearer ${token}`).expect(200);
 
-    // Verify session exists (use retry to handle eventual consistency)
-    const sessionBefore = await readFirestoreWithRetry(
+    // Verify session exists (sessionId-based collection)
+    const sessionsBefore = await querySessionDocsByUserId(
       testConfig.firestoreCollectionName,
       testUser!.uid,
     );
-    expect(sessionBefore.exists).toBe(true);
+    expect(sessionsBefore.length).toBe(1);
 
     // User logs out
     // In a real app, this is called via ApiClient.logout()
@@ -516,22 +518,20 @@ describe('Auth Integration Tests', () => {
 
     expect(logoutResponse.body).toHaveProperty('message', 'Logged out successfully');
 
-    // Verify session was deleted (use retry to handle eventual consistency)
-    // Wait for deletion to be visible in Firestore
-    await waitForFirestoreCondition(
+    // Wait until user has no session documents
+    await waitForNoSessionsForUser(
       testConfig.firestoreCollectionName,
       testUser!.uid,
-      (doc) => !doc.exists, // Document should not exist after logout
-      200, // Check every 200ms
-      2000, // Wait up to 2 seconds for deletion
+      200,
+      2000,
     );
 
-    // Double-check with a direct read
-    const sessionAfter = await readFirestoreWithRetry(
+    // Double-check
+    const sessionsAfter = await querySessionDocsByUserId(
       testConfig.firestoreCollectionName,
       testUser!.uid,
     );
-    expect(sessionAfter.exists).toBe(false);
+    expect(sessionsAfter.length).toBe(0);
 
     // Verify logout record was created (for token revocation)
     // Use retry to handle eventual consistency
@@ -549,6 +549,77 @@ describe('Auth Integration Tests', () => {
       .expect(401);
 
     expect(response.body.error.code).toBe(ERROR_CODES.SESSION_EXPIRED);
+  });
+
+  /**
+   * Test 7: Logout then re-login with new JWT
+   *
+   * Scenario: User logs out, then signs in again with a new JWT
+   *
+   * This test demonstrates:
+   * - That after logout, the user can sign in again and get a new session
+   * - Re-login is not blocked; the new token creates a new session (new sessionId)
+   * - The full flow: login → logout → re-login → protected route succeeds
+   *
+   * Expected behavior:
+   * 1. User logs in and creates session
+   * 2. User logs out (session cleared, logout record stored)
+   * 3. User signs in again (new JWT with new iat)
+   * 4. First request with new token creates a new session
+   * 5. Protected route returns 200; user can use the app
+   */
+  it('should allow re-login after logout with new token', async () => {
+    // Step 1: User logs in and creates session
+    const token1 = await getAuthToken(testUser!.email, 'password123');
+    await request(app).get('/test').set('Authorization', `Bearer ${token1}`).expect(200);
+
+    // Verify one session exists for user (sessionId-based collection)
+    const sessionsAfterLogin = await querySessionDocsByUserId(
+      testConfig.firestoreCollectionName,
+      testUser!.uid,
+    );
+    expect(sessionsAfterLogin.length).toBe(1);
+    const sessionIdBeforeLogout = sessionsAfterLogin[0].id;
+
+    // Step 2: User logs out
+    await request(app)
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${token1}`)
+      .expect(200);
+
+    // Wait for session deletion to be visible (clearSession deletes by userId query)
+    await waitForFirestoreCondition(
+      testConfig.firestoreCollectionName,
+      sessionIdBeforeLogout,
+      (doc) => !doc.exists,
+      200,
+      2000,
+    );
+
+    // Ensure new token has iat strictly after loggedOutAt (emulator may use second granularity)
+    await new Promise((r) => setTimeout(r, 1500));
+
+    // Step 3: User signs in again (sign out then sign in so new JWT has new iat)
+    const token2 = await getAuthTokenAfterSignOut(testUser!.email, 'password123');
+
+    // Step 4 & 5: First request with new token creates new session; protected route succeeds
+    const response = await request(app)
+      .get('/test')
+      .set('Authorization', `Bearer ${token2}`)
+      .expect(200);
+
+    expect(response.body).toHaveProperty('user');
+    expect(response.body.user).toHaveProperty('sub', testUser!.uid);
+    expect(response.body).toHaveProperty('message', 'Protected route accessed successfully');
+
+    // Verify a new session was created (different sessionId than before logout)
+    const sessionsAfterRelogin = await querySessionDocsByUserId(
+      testConfig.firestoreCollectionName,
+      testUser!.uid,
+    );
+    expect(sessionsAfterRelogin.length).toBe(1);
+    expect(sessionsAfterRelogin[0].id).not.toBe(sessionIdBeforeLogout);
+    expect(sessionsAfterRelogin[0].data()).toHaveProperty('userId', testUser!.uid);
   });
 });
 

@@ -56,7 +56,7 @@ function getCredentialsFromFile(): FirebaseCredentials | null {
 /**
  * Initialize Firebase Admin SDK
  * Can be called multiple times safely (idempotent)
- * 
+ *
  * Supports emulator mode when FIREBASE_AUTH_EMULATOR_HOST and FIRESTORE_EMULATOR_HOST are set.
  * In emulator mode, credentials are not required.
  */
@@ -73,11 +73,23 @@ export async function initializeFirebaseAdmin(): Promise<void> {
   const firestoreEmulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
   const projectId = process.env.FIREBASE_PROJECT_ID || 'demo-project';
 
-  const isEmulatorMode = !!(authEmulatorHost || firestoreEmulatorHost);
+  // Debug logging to help troubleshoot emulator detection
+  if (process.env.NODE_ENV === 'development' || process.env.DEBUG) {
+    console.log('[Firebase Admin] Environment check:');
+    console.log(`  FIREBASE_AUTH_EMULATOR_HOST: ${authEmulatorHost || '(not set)'}`);
+    console.log(`  FIRESTORE_EMULATOR_HOST: ${firestoreEmulatorHost || '(not set)'}`);
+    console.log(`  FIREBASE_PROJECT_ID: ${projectId}`);
+  }
+
+  // Check if emulator mode is enabled (handle empty strings as falsy)
+  const isEmulatorMode = !!(authEmulatorHost?.trim() || firestoreEmulatorHost?.trim());
 
   if (isEmulatorMode) {
     // Emulator mode: Initialize without credentials
     // Firebase Admin SDK automatically connects to emulators when env vars are set
+    if (process.env.NODE_ENV === 'development' || process.env.DEBUG) {
+      console.log('[Firebase Admin] Initializing in emulator mode');
+    }
     appInstance = initializeApp({
       projectId,
     });
@@ -100,8 +112,15 @@ export async function initializeFirebaseAdmin(): Promise<void> {
   const credentials = envCredentials || fileCredentials;
 
   if (!credentials) {
+    // Provide helpful error message with current environment state
+    const envVars = [
+      `FIREBASE_AUTH_EMULATOR_HOST=${authEmulatorHost || '(not set)'}`,
+      `FIRESTORE_EMULATOR_HOST=${firestoreEmulatorHost || '(not set)'}`,
+      `FIREBASE_PROJECT_ID=${process.env.FIREBASE_PROJECT_ID || '(not set)'}`,
+    ].join(', ');
+
     throw new Error(
-      'Firebase Admin credentials not found. Set FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, and FIREBASE_CLIENT_EMAIL environment variables, or set GOOGLE_APPLICATION_CREDENTIALS to point to a service account file. For emulator mode, set FIREBASE_AUTH_EMULATOR_HOST and FIRESTORE_EMULATOR_HOST.',
+      `Firebase Admin credentials not found. Set FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, and FIREBASE_CLIENT_EMAIL environment variables, or set GOOGLE_APPLICATION_CREDENTIALS to point to a service account file. For emulator mode, set FIREBASE_AUTH_EMULATOR_HOST and FIRESTORE_EMULATOR_HOST. Current env: ${envVars}`,
     );
   }
 

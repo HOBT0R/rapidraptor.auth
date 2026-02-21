@@ -41,9 +41,13 @@ describe('FirestoreSync', () => {
     firestoreSync.stopPeriodicSync();
   });
 
+  const SESSION_ID_1 = '550e8400-e29b-41d4-a716-446655440001';
+  const SESSION_ID_2 = '550e8400-e29b-41d4-a716-446655440002';
+
   describe('queueWrite', () => {
     it('should queue writes for batch processing', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -56,12 +60,14 @@ describe('FirestoreSync', () => {
 
     it('should update existing queue entry with latest session data', () => {
       const session1: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       };
       const session2: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(Date.now() + 1000),
@@ -69,9 +75,8 @@ describe('FirestoreSync', () => {
       };
 
       firestoreSync.queueWrite('user1', session1);
-      firestoreSync.queueWrite('user1', session2); // Update same user
+      firestoreSync.queueWrite('user1', session2);
 
-      // Should still be 1 (updated, not added)
       expect(firestoreSync.getPendingWriteCount()).toBe(1);
     });
   });
@@ -79,12 +84,14 @@ describe('FirestoreSync', () => {
   describe('batchSync', () => {
     it('should sync all queued writes to Firestore', async () => {
       const session1: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
       };
       const session2: SessionInfo = {
+        sessionId: SESSION_ID_2,
         userId: 'user2',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -94,14 +101,12 @@ describe('FirestoreSync', () => {
       firestoreSync.queueWrite('user1', session1);
       firestoreSync.queueWrite('user2', session2);
 
-      // Reset mocks before batchSync
-      vi.clearAllMocks();
 
       await firestoreSync.batchSync();
 
       expect(mockFirestore.collection).toHaveBeenCalledWith('user_sessions');
-      expect(mockCollection.doc).toHaveBeenCalledWith('user1');
-      expect(mockCollection.doc).toHaveBeenCalledWith('user2');
+      expect(mockCollection.doc).toHaveBeenCalledWith(SESSION_ID_1);
+      expect(mockCollection.doc).toHaveBeenCalledWith(SESSION_ID_2);
       expect(mockBatch.set).toHaveBeenCalledTimes(2);
       expect(mockBatch.commit).toHaveBeenCalledOnce();
       expect(firestoreSync.getPendingWriteCount()).toBe(0);
@@ -114,6 +119,7 @@ describe('FirestoreSync', () => {
 
     it('should handle Firestore errors', async () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -158,6 +164,7 @@ describe('FirestoreSync', () => {
 
     it('should return correct count', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),

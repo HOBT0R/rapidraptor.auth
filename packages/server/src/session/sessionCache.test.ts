@@ -2,9 +2,12 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { SessionCache } from './sessionCache.js';
 import type { SessionInfo } from '@rapidraptor/auth-shared';
 
+const SESSION_ID_1 = '550e8400-e29b-41d4-a716-446655440001';
+const SESSION_ID_2 = '550e8400-e29b-41d4-a716-446655440002';
+const inactivityTimeout = 24 * 60 * 60 * 1000; // 24 hours
+
 describe('SessionCache', () => {
   let cache: SessionCache;
-  const inactivityTimeout = 24 * 60 * 60 * 1000; // 24 hours
 
   beforeEach(() => {
     cache = new SessionCache(inactivityTimeout);
@@ -17,6 +20,7 @@ describe('SessionCache', () => {
 
     it('should return session when it exists', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -30,6 +34,7 @@ describe('SessionCache', () => {
   describe('set', () => {
     it('should store session in cache', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -47,6 +52,7 @@ describe('SessionCache', () => {
 
     it('should return false for valid session', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -58,10 +64,11 @@ describe('SessionCache', () => {
 
     it('should return true for expired session', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(Date.now() - inactivityTimeout),
         lastActivityAt: new Date(Date.now() - inactivityTimeout),
-        expiresAt: new Date(Date.now() - 1000), // Expired 1 second ago
+        expiresAt: new Date(Date.now() - 1000),
       };
       cache.set('user1', session);
       expect(cache.isExpired('user1')).toBe(true);
@@ -71,6 +78,7 @@ describe('SessionCache', () => {
   describe('clear', () => {
     it('should remove session from cache', () => {
       const session: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -85,12 +93,14 @@ describe('SessionCache', () => {
   describe('clearExpired', () => {
     it('should remove expired sessions', () => {
       const expiredSession: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(Date.now() - inactivityTimeout),
         lastActivityAt: new Date(Date.now() - inactivityTimeout),
         expiresAt: new Date(Date.now() - 1000),
       };
       const validSession: SessionInfo = {
+        sessionId: SESSION_ID_2,
         userId: 'user2',
         createdAt: new Date(),
         lastActivityAt: new Date(),
@@ -107,12 +117,14 @@ describe('SessionCache', () => {
   describe('clearAll', () => {
     it('should remove all sessions', () => {
       const session1: SessionInfo = {
+        sessionId: SESSION_ID_1,
         userId: 'user1',
         createdAt: new Date(),
         lastActivityAt: new Date(),
         expiresAt: new Date(Date.now() + inactivityTimeout),
       };
       const session2: SessionInfo = {
+        sessionId: SESSION_ID_2,
         userId: 'user2',
         createdAt: new Date(),
         lastActivityAt: new Date(),
