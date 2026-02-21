@@ -4,6 +4,7 @@ import { ERROR_CODES } from './constants.js';
  * Session information stored in Firestore and cache
  */
 export interface SessionInfo {
+  sessionId: string;
   userId: string;
   createdAt: Date;
   lastActivityAt: Date;
@@ -93,6 +94,7 @@ export interface FirestoreTimestamp {
  * Firestore document structure for session
  */
 export interface FirestoreSessionDocument {
+  sessionId: string;
   userId: string;
   createdAt: FirestoreTimestamp | Date; // Firestore Timestamp or Date (Date when writing, Timestamp when reading)
   lastActivityAt: FirestoreTimestamp | Date;

@@ -10,7 +10,13 @@
 
 import { getEmulatorAuth, getEmulatorFirestore, getTestProjectId } from './firebase-setup.js';
 import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, connectAuthEmulator, signInWithEmailAndPassword, type User } from 'firebase/auth';
+import {
+  getAuth,
+  connectAuthEmulator,
+  signInWithEmailAndPassword,
+  signOut,
+  type User,
+} from 'firebase/auth';
 
 /**
  * Interface for test user creation options
@@ -108,7 +114,11 @@ export async function createTestUser(options: TestUserOptions): Promise<TestUser
 // Track if emulator is connected to avoid multiple connections
 let emulatorConnected = false;
 
-export async function getAuthToken(email: string, password: string): Promise<string> {
+export async function getAuthToken(
+  email: string,
+  password: string,
+  forceRefresh?: boolean,
+): Promise<string> {
   const projectId = getTestProjectId();
 
   // Initialize Firebase Client SDK if not already initialized
@@ -151,38 +161,61 @@ export async function getAuthToken(email: string, password: string): Promise<str
 
   // Get the ID token (this is what gets sent with API requests)
   // In production, this token is automatically included by the ApiClient
-  const token = await userCredential.user.getIdToken();
+  // Pass forceRefresh true to get a new token with a new iat (e.g. after logout for re-login test)
+  const token = await userCredential.user.getIdToken(forceRefresh === true);
 
   return token;
 }
 
 /**
- * Wait for session to expire
+ * Get a new auth token after signing out (guarantees new iat for re-login tests).
+ * Call this after server-side logout to simulate user signing in again.
+ */
+export async function getAuthTokenAfterSignOut(
+  email: string,
+  password: string,
+): Promise<string> {
+  const projectId = getTestProjectId();
+  let app;
+  if (getApps().length === 0) {
+    app = initializeApp({
+      apiKey: 'fake-api-key',
+      authDomain: 'localhost',
+      projectId,
+    });
+  } else {
+    app = getApps()[0];
+  }
+  const auth = getAuth(app);
+  if (!emulatorConnected) {
+    try {
+      connectAuthEmulator(auth, 'http://localhost:9099', { disableWarnings: true });
+      emulatorConnected = true;
+    } catch (error: any) {
+      if (error.message?.includes('already been initialized')) {
+        emulatorConnected = true;
+      } else {
+        throw error;
+      }
+    }
+  }
+  await signOut(auth);
+  const userCredential = await signInWithEmailAndPassword(auth, email, password);
+  return userCredential.user.getIdToken();
+}
+
+/**
+ * Wait for session to expire (sessionId-based collection)
  *
- * This utility helps test session expiration scenarios by waiting until
- * a session has expired. It polls Firestore to check if the session's
- * expiresAt timestamp has passed.
- *
- * In production, you wouldn't need this - sessions expire naturally
- * based on inactivity. This is only for testing expiration behavior.
+ * First waits until at least one session doc exists for the user (so we don't
+ * resolve early when the write hasn't landed yet), then waits until the
+ * session's expiresAt has passed.
  *
  * @param {string} userId - User ID whose session to check
  * @param {string} collectionName - Firestore collection name for sessions
  * @param {number} pollIntervalMs - How often to check (default: 1000ms)
  * @param {number} maxWaitMs - Maximum time to wait (default: 120000ms = 2 minutes)
- * @returns {Promise<void>} Resolves when session is expired
- *
- * @example
- * ```typescript
- * // Wait for session to expire (useful for testing expiration scenarios)
- * await waitForSessionExpiration(userId, 'user_sessions');
- *
- * // Now test that requests are rejected
- * const response = await fetch('/api/protected', {
- *   headers: { Authorization: `Bearer ${token}` }
- * });
- * expect(response.status).toBe(401);
- * ```
+ * @returns {Promise<void>} Resolves when session is expired or gone
  */
 export async function waitForSessionExpiration(
   userId: string,
@@ -190,40 +223,52 @@ export async function waitForSessionExpiration(
   pollIntervalMs: number = 1000,
   maxWaitMs: number = 120000,
 ): Promise<void> {
-  const firestore = getEmulatorFirestore();
   const startTime = Date.now();
+  let seenSession = false;
 
   return new Promise((resolve, reject) => {
     const checkExpiration = async () => {
       try {
-        const doc = await firestore.collection(collectionName).doc(userId).get();
+        const docs = await querySessionDocsByUserId(collectionName, userId);
 
-        if (!doc.exists) {
-          // Session doesn't exist, consider it "expired"
+        if (docs.length === 0) {
+          if (!seenSession) {
+            // Session write may not have landed yet; keep waiting (up to maxWaitMs)
+            if (Date.now() - startTime > maxWaitMs) {
+              reject(new Error(`No session doc found for user within ${maxWaitMs}ms`));
+              return;
+            }
+            setTimeout(checkExpiration, pollIntervalMs);
+            return;
+          }
           resolve();
           return;
         }
 
-        const data = doc.data();
-        const expiresAt = data?.expiresAt?.toDate();
+        seenSession = true;
+        const now = new Date();
+        const expired = docs.every((d) => {
+          const data = d.data();
+          const expiresAt = (data?.expiresAt as { toDate?: () => Date } | undefined)?.toDate?.();
+          return expiresAt != null && expiresAt < now;
+        });
 
-        if (expiresAt && expiresAt < new Date()) {
-          // Session has expired
+        if (expired) {
           resolve();
           return;
         }
 
-        // Check if we've exceeded max wait time
         if (Date.now() - startTime > maxWaitMs) {
+          const first = docs[0].data();
+          const expiresAt = (first?.expiresAt as { toDate?: () => Date } | undefined)?.toDate?.();
           reject(
             new Error(
-              `Session did not expire within ${maxWaitMs}ms. Current expiresAt: ${expiresAt?.toISOString()}`,
+              `Session did not expire within ${maxWaitMs}ms. Current expiresAt: ${expiresAt?.toISOString() ?? 'unknown'}`,
             ),
           );
           return;
         }
 
-        // Wait and check again
         setTimeout(checkExpiration, pollIntervalMs);
       } catch (error) {
         reject(error);
@@ -232,6 +277,34 @@ export async function waitForSessionExpiration(
 
     checkExpiration();
   });
+}
+
+/**
+ * Wait until the user has no session documents (e.g. after logout)
+ *
+ * @param {string} collectionName - Firestore collection name for sessions
+ * @param {string} userId - User ID to check
+ * @param {number} pollIntervalMs - How often to check (default: 200ms)
+ * @param {number} maxWaitMs - Maximum time to wait (default: 5000ms)
+ */
+export async function waitForNoSessionsForUser(
+  collectionName: string,
+  userId: string,
+  pollIntervalMs: number = 200,
+  maxWaitMs: number = 5000,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    const docs = await querySessionDocsByUserId(collectionName, userId);
+    if (docs.length === 0) return;
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
+  }
+  const docs = await querySessionDocsByUserId(collectionName, userId);
+  if (docs.length > 0) {
+    throw new Error(
+      `User still has ${docs.length} session(s) after ${maxWaitMs}ms`,
+    );
+  }
 }
 
 /**
@@ -278,10 +351,15 @@ export async function cleanupTestUser(
   }
 
   try {
-    // Delete session document
-    await firestore.collection(sessionsCollection).doc(userId).delete();
+    // Delete all session documents for this user (sessionId-based collection)
+    const sessionDocs = await querySessionDocsByUserId(sessionsCollection, userId);
+    await Promise.all(
+      sessionDocs.map((d) =>
+        firestore.collection(sessionsCollection).doc(d.id).delete(),
+      ),
+    );
   } catch (_error) {
-    // Document might not exist, ignore error
+    // Documents might not exist, ignore error
   }
 
   try {
@@ -384,6 +462,25 @@ export async function readFirestoreWithRetry(
   }
 
   throw lastError || new Error(`Failed to read document after ${maxRetries} attempts`);
+}
+
+/**
+ * Query session documents by userId (for sessionId-based collection)
+ *
+ * Sessions are stored with document ID = sessionId (UUID); this helper finds
+ * all session docs for a user by querying the userId field.
+ *
+ * @param {string} collectionName - Firestore collection name (e.g. user_sessions)
+ * @param {string} userId - User ID to query
+ * @returns {Promise<FirebaseFirestore.QueryDocumentSnapshot[]>} Session documents for the user
+ */
+export async function querySessionDocsByUserId(
+  collectionName: string,
+  userId: string,
+): Promise<import('firebase-admin/firestore').QueryDocumentSnapshot[]> {
+  const firestore = getEmulatorFirestore();
+  const snapshot = await firestore.collection(collectionName).where('userId', '==', userId).get();
+  return snapshot.docs;
 }
 
 /**

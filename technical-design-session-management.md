@@ -1,11 +1,12 @@
 ---
 title: Technical Design - Session Management and Token Expiration
-version: 1.2
+version: 1.3
 status: Draft
-date: 2025-12-26
+date: 2025-02-21
 ---
 
 **Version History:**
+- **v1.3**: Independent session IDs — document ID is sessionId (UUID); lookup by userId query; fixes logout/re-login
 - **v1.2**: Added JWT revocation tracking to prevent re-authentication after logout
 - **v1.1**: Added logout handler and client-side logout method implementation
 - **v1.0**: Initial technical design for session management and token expiration
@@ -543,7 +544,7 @@ import type { SessionInfo } from '@rapidraptor/auth-shared';
 
 class FirestoreSync {
   private firestore: Firestore;
-  private writeQueue: Map<string, SessionInfo>;
+  private writeQueue: Map<string, { sessionId: string; session: SessionInfo }>;
   private throttleMs: number;
   private lastWriteTime: Map<string, number>;
 
@@ -554,35 +555,31 @@ class FirestoreSync {
     this.lastWriteTime = new Map();
   }
 
-  // NEW CODE: Queue write with throttling
+  // NEW CODE: Queue write with throttling (keyed by userId; session includes sessionId)
   queueWrite(userId: string, session: SessionInfo): void {
     const now = Date.now();
     const lastWrite = this.lastWriteTime.get(userId) || 0;
 
-    // NEW CODE: Throttle logic
     if (now - lastWrite < this.throttleMs) {
-      // Update queue but don't write yet
-      this.writeQueue.set(userId, session);
+      this.writeQueue.set(userId, { sessionId: session.sessionId, session });
       return;
     }
 
-    // FIREBASE SDK: Immediate write (first write or after throttle)
-    this.writeQueue.set(userId, session);
+    this.writeQueue.set(userId, { sessionId: session.sessionId, session });
     this.lastWriteTime.set(userId, now);
   }
 
-  // NEW CODE: Batch sync all queued writes
+  // NEW CODE: Batch sync all queued writes (document ID = sessionId)
   async batchSync(): Promise<void> {
     if (this.writeQueue.size === 0) return;
 
-    // FIREBASE SDK: Create Firestore batch
     const batch = this.firestore.batch();
     const collection = this.firestore.collection('user_sessions');
 
-    // NEW CODE: Add all queued writes to batch
-    for (const [userId, session] of this.writeQueue.entries()) {
-      const docRef = collection.doc(userId);
+    for (const [, { sessionId, session }] of this.writeQueue.entries()) {
+      const docRef = collection.doc(sessionId);
       batch.set(docRef, {
+        sessionId: session.sessionId,
         userId: session.userId,
         createdAt: session.createdAt,
         lastActivityAt: session.lastActivityAt,
@@ -590,10 +587,7 @@ class FirestoreSync {
       });
     }
 
-    // FIREBASE SDK: Commit batch write
     await batch.commit();
-
-    // NEW CODE: Clear queue
     this.writeQueue.clear();
   }
 }
@@ -615,6 +609,7 @@ class FirestoreSync {
 
 ```typescript
 // NEW CODE: Session service with cache-first lookup
+import { randomUUID } from 'crypto';
 import { Firestore } from 'firebase-admin/firestore';
 import { SessionCache } from './sessionCache';
 import { FirestoreSync } from './firestoreSync';
@@ -638,64 +633,61 @@ class SessionService {
     this.inactivityTimeout = inactivityTimeout;
   }
 
-  // NEW CODE: Check session validity (cache-first)
+  // NEW CODE: Find active session by userId (query; document ID is sessionId)
+  private async findActiveSessionByUserId(userId: string): Promise<SessionInfo | null> {
+    const snapshot = await this.firestore
+      .collection('user_sessions')
+      .where('userId', '==', userId)
+      .where('expiresAt', '>', new Date())
+      .orderBy('lastActivityAt', 'desc')
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) return null;
+    const data = snapshot.docs[0].data();
+    return this.parseFirestoreDocument(data);
+  }
+
+  // NEW CODE: Check session validity (cache-first, then query by userId)
   async isSessionValid(userId: string): Promise<boolean> {
-    // NEW CODE: Check cache first
     if (this.cache.get(userId) && !this.cache.isExpired(userId)) {
       return true;
     }
 
-    // NEW CODE: Cache miss or expired - check Firestore
-    // FIREBASE SDK: Read from Firestore
-    const docRef = this.firestore.collection('user_sessions').doc(userId);
-    const doc = await docRef.get();
-
-    if (!doc.exists) {
+    const session = await this.findActiveSessionByUserId(userId);
+    if (!session || new Date() > session.expiresAt) {
       return false;
     }
 
-    // NEW CODE: Parse Firestore document
-    const data = doc.data() as SessionInfo;
-    const session: SessionInfo = {
-      userId: data.userId,
-      createdAt: data.createdAt.toDate(),
-      lastActivityAt: data.lastActivityAt.toDate(),
-      expiresAt: data.expiresAt.toDate()
-    };
-
-    // NEW CODE: Check expiration
-    if (new Date() > session.expiresAt) {
-      return false;
-    }
-
-    // NEW CODE: Update cache
     this.cache.set(userId, session);
     return true;
   }
 
-  // NEW CODE: Create new session
-  async createSession(userId: string): Promise<void> {
+  // NEW CODE: Create new session (sessionId = UUID)
+  async createSession(userId: string): Promise<string> {
+    const sessionId = randomUUID();
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.inactivityTimeout);
 
     const session: SessionInfo = {
+      sessionId,
       userId,
       createdAt: now,
       lastActivityAt: now,
       expiresAt
     };
 
-    // NEW CODE: Update cache immediately
     this.cache.set(userId, session);
 
-    // FIREBASE SDK: Write to Firestore immediately (no throttle on creation)
-    const docRef = this.firestore.collection('user_sessions').doc(userId);
+    const docRef = this.firestore.collection('user_sessions').doc(sessionId);
     await docRef.set({
+      sessionId: session.sessionId,
       userId: session.userId,
       createdAt: session.createdAt,
       lastActivityAt: session.lastActivityAt,
       expiresAt: session.expiresAt
     });
+    return sessionId;
   }
 
   // NEW CODE: Update last activity
@@ -720,28 +712,25 @@ class SessionService {
     this.firestoreSync.queueWrite(userId, updatedSession);
   }
 
-  // NEW CODE: Clear session (logout)
+  // NEW CODE: Clear session (logout) — query all sessions for userId, delete by sessionId
   async clearSession(userId: string): Promise<void> {
-    // NEW CODE: Clear cache
     this.cache.clear(userId);
 
-    // NEW CODE: Store logout timestamp to prevent re-authentication with old JWTs
-    // This addresses the JWT limitation: JWTs cannot be revoked, but we can track
-    // when a user logged out and reject tokens issued before that time
-    const logoutRef = this.firestore
-      .collection('user_logouts')
-      .doc(userId);
-    
-    // FIREBASE SDK: Store logout timestamp (expires after 1 hour, matching typical JWT lifetime)
+    const logoutRef = this.firestore.collection('user_logouts').doc(userId);
     await logoutRef.set({
       userId,
       loggedOutAt: new Date(),
-      expiresAt: new Date(Date.now() + 3600000), // 1 hour TTL
+      expiresAt: new Date(Date.now() + 3600000),
     });
 
-    // FIREBASE SDK: Delete session document from Firestore
-    const docRef = this.firestore.collection('user_sessions').doc(userId);
-    await docRef.delete();
+    // Query all active sessions for this user, delete each by sessionId
+    const snapshot = await this.firestore
+      .collection('user_sessions')
+      .where('userId', '==', userId)
+      .get();
+    for (const doc of snapshot.docs) {
+      await doc.ref.delete();
+    }
   }
 
   // NEW CODE: Check if JWT token was issued before logout
@@ -772,24 +761,14 @@ class SessionService {
     return tokenIssuedAt < loggedOutAt;
   }
 
-  // NEW CODE: Warmup cache from Firestore
+  // NEW CODE: Warmup cache from Firestore (doc ID = sessionId; cache key = userId)
   async warmupCache(): Promise<void> {
-    // FIREBASE SDK: Query active sessions
     const collection = this.firestore.collection('user_sessions');
     const now = new Date();
-    const snapshot = await collection
-      .where('expiresAt', '>', now)
-      .get();
+    const snapshot = await collection.where('expiresAt', '>', now).get();
 
-    // NEW CODE: Load into cache
     for (const doc of snapshot.docs) {
-      const data = doc.data() as SessionInfo;
-      const session: SessionInfo = {
-        userId: data.userId,
-        createdAt: data.createdAt.toDate(),
-        lastActivityAt: data.lastActivityAt.toDate(),
-        expiresAt: data.expiresAt.toDate()
-      };
+      const session = this.parseFirestoreDocument(doc.data());
       this.cache.set(session.userId, session);
     }
   }
@@ -1284,20 +1263,22 @@ All session management logic (inactivity tracking, expiration, caching) is **new
 
 ```typescript
 interface SessionInfo {
-  userId: string;              // Firebase user ID (document ID in Firestore)
+  sessionId: string;          // Independent session identifier (UUID); document ID in Firestore
+  userId: string;             // From JWT sub claim (for lookup; sessions are associated with users)
   createdAt: Date;            // Session creation timestamp
-  lastActivityAt: Date;       // Last activity timestamp (updated on each request)
-  expiresAt: Date;            // Session expiration timestamp (lastActivityAt + inactivityTimeout)
+  lastActivityAt: Date;      // Last activity timestamp (updated on each request)
+  expiresAt: Date;           // Session expiration timestamp (lastActivityAt + inactivityTimeout)
 }
 ```
 
 ### Firestore Document Structure
 
 **Collection:** `user_sessions`  
-**Document ID:** `{userId}`
+**Document ID:** `{sessionId}` (UUID; independent of userId)
 
 ```json
 {
+  "sessionId": "550e8400-e29b-41d4-a716-446655440000",
   "userId": "abc123",
   "createdAt": "2024-01-15T10:00:00Z",
   "lastActivityAt": "2024-01-15T14:30:00Z",
@@ -1305,7 +1286,9 @@ interface SessionInfo {
 }
 ```
 
-**Document Size:** ~200 bytes per session
+**Lookup:** Query by `userId` and `expiresAt > now`, `limit(1)`, with optional `orderBy('lastActivityAt', 'desc')` for deterministic choice when multiple active sessions exist. Composite index required: `(userId, expiresAt)` or `(userId, expiresAt, lastActivityAt desc)`.
+
+**Document Size:** ~250 bytes per session
 
 ### User Logouts Document Structure
 
@@ -1846,6 +1829,11 @@ FIREBASE_CLIENT_EMAIL=${CLIENT_EMAIL}
 - Deploy proxy with session management
 - Sessions created automatically on first request
 - Old sessions ignored (no migration needed)
+
+**v1.3 Independent Session IDs (clean slate):**
+- Firestore document ID changes from `userId` to `sessionId` (UUID). No data migration script; use a clean slate.
+- Before deploying: optionally delete or truncate the `user_sessions` collection (emulator or production).
+- After deploy: new sessions are created with the new structure on next login. Create Firestore composite index on `(userId, expiresAt)` or `(userId, expiresAt, lastActivityAt)` as required by the active-session query.
 
 **Phase 3: Frontend Deployment**
 - Deploy frontend with new error handling and logout method

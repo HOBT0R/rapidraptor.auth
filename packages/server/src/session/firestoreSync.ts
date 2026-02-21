@@ -47,12 +47,13 @@ export class FirestoreSync {
     const batch = this.firestore.batch();
     const collection = this.firestore.collection(this.collectionName);
 
-    // Add all queued writes to batch
-    for (const [userId, session] of this.writeQueue.entries()) {
-      const docRef = collection.doc(userId);
+    // Add all queued writes to batch (document ID = sessionId)
+    for (const [, session] of this.writeQueue.entries()) {
+      const docRef = collection.doc(session.sessionId);
       batch.set(
         docRef,
         {
+          sessionId: session.sessionId,
           userId: session.userId,
           createdAt: session.createdAt,
           lastActivityAt: session.lastActivityAt,

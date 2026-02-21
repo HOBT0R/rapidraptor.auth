@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import type { Firestore, Timestamp } from 'firebase-admin/firestore';
 import { SessionCache } from './sessionCache.js';
 import { FirestoreSync } from './firestoreSync.js';
@@ -21,8 +22,9 @@ export class TokenRevokedError extends Error {
 }
 
 /**
- * Main session management service
- * Orchestrates cache and Firestore with cache-first strategy
+ * Main session management service. Sessions are stored in Firestore as user_sessions/{sessionId}
+ * (sessionId is a UUID). Lookup is by userId (from JWT sub); cache is keyed by userId.
+ * Uses cache-first strategy with Firestore fallback.
  */
 export class SessionService {
   private cache: SessionCache;
@@ -52,51 +54,67 @@ export class SessionService {
   }
 
   /**
+   * Find active session for user.
+   * Sessions are stored as user_sessions/{sessionId}; we query by userId (from JWT sub) since
+   * sessionId is not sent by the client. orderBy lastActivityAt desc ensures a deterministic
+   * result when multiple active sessions exist for the same user (e.g. race or bug).
+   */
+  private async findActiveSessionByUserId(userId: string): Promise<SessionInfo | null> {
+    const snapshot = await this.firestore
+      .collection(this.collectionName)
+      .where('userId', '==', userId)
+      .where('expiresAt', '>', new Date())
+      .orderBy('lastActivityAt', 'desc')
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return null;
+    }
+    const data = snapshot.docs[0].data() as FirestoreSessionDocument;
+    return this.parseFirestoreDocument(data);
+  }
+
+  /**
    * Validate session and return detailed status (cache-first lookup with Firestore fallback)
    * Returns explicit status instead of boolean to avoid requiring additional calls
    * to determine why a session is invalid
    */
   async validateSession(userId: string): Promise<SessionValidationStatus> {
-    // Check cache first
+    // Cache is keyed by userId (one session per user in cache)
     const cachedSession = this.cache.get(userId);
 
     // Step 1: Check for userId mismatch (data integrity issue)
     if (cachedSession && cachedSession.userId !== userId) {
-      // Data integrity issue - invalidate cache entry
       this.cache.clear(userId);
       return SessionValidationStatus.DATA_INTEGRITY_ERROR;
     }
 
-    // Step 2: Check if cached session is valid
+    // Step 2: Check if cached session is valid and not expired
     if (cachedSession && !this.cache.isExpired(userId)) {
-      // Cached session is valid and userId matches
       return SessionValidationStatus.VALID;
     }
 
-    // Cache miss or expired - check Firestore
-    const docRef = this.firestore.collection(this.collectionName).doc(userId);
-    const doc = await docRef.get();
+    // Step 2b: Cached session exists but is expired — return EXPIRED so caller can require re-login
+    if (cachedSession && this.cache.isExpired(userId)) {
+      return SessionValidationStatus.EXPIRED;
+    }
 
-    if (!doc.exists) {
+    // Step 3: Cache miss — query Firestore by userId (sessions live under user_sessions/{sessionId})
+    const session = await this.findActiveSessionByUserId(userId);
+    if (!session) {
       return SessionValidationStatus.NOT_FOUND;
     }
 
-    // Parse Firestore document
-    const data = doc.data() as FirestoreSessionDocument;
-    const session = this.parseFirestoreDocument(data);
-
-    // Verify session userId matches requested userId (data integrity check)
     if (session.userId !== userId) {
-      // Data integrity issue - session document userId doesn't match document ID
       return SessionValidationStatus.DATA_INTEGRITY_ERROR;
     }
 
-    // Check expiration
     if (new Date() > session.expiresAt) {
       return SessionValidationStatus.EXPIRED;
     }
 
-    // Update cache
+    // Repopulate cache for future requests
     this.cache.set(userId, session);
     return SessionValidationStatus.VALID;
   }
@@ -111,34 +129,34 @@ export class SessionService {
   }
 
   /**
-   * Check if session exists in Firestore (regardless of expiration)
-   * Also verifies data integrity (userId in document matches document ID)
+   * Check if a session document exists in Firestore for this user (regardless of expiration).
+   * Uses a query by userId since documents are keyed by sessionId.
    */
   async sessionExists(userId: string): Promise<boolean> {
-    const docRef = this.firestore.collection(this.collectionName).doc(userId);
-    const doc = await docRef.get();
+    const snapshot = await this.firestore
+      .collection(this.collectionName)
+      .where('userId', '==', userId)
+      .limit(1)
+      .get();
 
-    if (!doc.exists) {
+    if (snapshot.empty) {
       return false;
     }
-
-    // Verify session userId matches requested userId (data integrity check)
-    const data = doc.data() as FirestoreSessionDocument;
+    const data = snapshot.docs[0].data() as FirestoreSessionDocument;
     return data.userId === userId;
   }
 
   /**
-   * Ensure session exists (idempotent - creates if doesn't exist)
-   * Returns true if session was created, false if it already existed and is valid
-   * Handles data integrity issues by overwriting with a new session
+   * Ensure a session exists for the user (idempotent). Creates a new session only when none
+   * exists or there is a data integrity issue. Returns true if a session was created, false if
+   * one already existed and is valid.
    *
-   * @param userId - The user ID
-   * @param tokenIssuedAt - Optional JWT token issued-at timestamp for revocation check
-   * @throws TokenRevokedError if token was issued before logout (when tokenIssuedAt is provided)
-   * @throws Error if session is expired (user must logout and login again)
+   * @param userId - User ID (from JWT sub)
+   * @param tokenIssuedAt - Optional JWT iat; if provided, we reject tokens issued before logout
+   * @throws TokenRevokedError if token was issued before logout
+   * @throws Error if session is expired (user must logout and log in again; we do not auto-recreate)
    */
   async ensureSession(userId: string, tokenIssuedAt?: Date): Promise<boolean> {
-    // Check if token was issued before logout (if tokenIssuedAt provided)
     if (tokenIssuedAt) {
       const wasIssuedBeforeLogout = await this.wasTokenIssuedBeforeLogout(userId, tokenIssuedAt);
       if (wasIssuedBeforeLogout) {
@@ -146,66 +164,60 @@ export class SessionService {
       }
     }
 
-    // Check session validation status
     const status = await this.validateSession(userId);
 
     if (status === SessionValidationStatus.VALID) {
-      return false; // Session already existed and is valid
+      return false;
     }
 
-    // If session is expired, don't recreate it - user must logout and relogin
     if (status === SessionValidationStatus.EXPIRED) {
       throw new Error('Session has expired. Please logout and login again.');
     }
 
-    // Session doesn't exist (NOT_FOUND) or has data integrity issues - create/overwrite it
-    // Note: For DATA_INTEGRITY_ERROR, we recreate the session to fix the corruption
-    // createSession is idempotent (uses set() which overwrites)
+    // NOT_FOUND or DATA_INTEGRITY_ERROR: create a new session (new sessionId)
     await this.createSession(userId);
-    return true; // Session was created
+    return true;
   }
 
   /**
-   * Create new session
+   * Create a new session. Session ID is an independent UUID (not derived from userId), so each
+   * login gets a distinct session and logout/re-login works correctly.
    */
   async createSession(userId: string): Promise<void> {
+    const sessionId = randomUUID();
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.inactivityTimeout);
 
     const session: SessionInfo = {
+      sessionId,
       userId,
       createdAt: now,
       lastActivityAt: now,
       expiresAt,
     };
 
-    // Update cache immediately
+    // Cache is keyed by userId for lookup; document in Firestore is keyed by sessionId
     this.cache.set(userId, session);
 
-    // Write to Firestore immediately (no throttle on creation)
-    const docRef = this.firestore.collection(this.collectionName).doc(userId);
+    const docRef = this.firestore.collection(this.collectionName).doc(sessionId);
     await docRef.set(this.toFirestoreDocument(session));
   }
 
   /**
-   * Update last activity timestamp
-   * Cache is updated immediately for fast reads, but Firestore write is throttled
+   * Update last activity timestamp and extend expiration. Cache is updated immediately for
+   * fast reads; Firestore write is queued and throttled (see FirestoreSync).
    */
   async updateLastActivity(userId: string): Promise<void> {
-    // Load and validate session (handles cache + Firestore fallback)
-    const isValid = await this.isSessionValid(userId);
-    if (!isValid) {
-      return; // Session doesn't exist or is expired
+    const status = await this.validateSession(userId);
+    if (status !== SessionValidationStatus.VALID) {
+      return; // Session doesn't exist or is expired; nothing to update
     }
 
-    // Session is guaranteed to be in cache and valid at this point
     const session = this.cache.get(userId);
     if (!session) {
-      // Should not happen, but handle gracefully
       return;
     }
 
-    // Update cache immediately (fast path)
     const updatedSession: SessionInfo = {
       ...session,
       lastActivityAt: new Date(),
@@ -213,24 +225,21 @@ export class SessionService {
     };
     this.cache.set(userId, updatedSession);
 
-    // Queue Firestore write (throttled - may not write immediately)
+    // Firestore write uses session.sessionId as document ID; throttled per user
     this.firestoreSync.queueWrite(userId, updatedSession);
   }
 
   /**
-   * Clear session (logout)
-   * Also stores logout timestamp to prevent re-authentication with JWTs issued before logout
+   * Clear session (logout). Removes all session documents for this user and records the logout
+   * so tokens issued before this time can be rejected (see wasTokenIssuedBeforeLogout).
    */
   async clearSession(userId: string): Promise<void> {
-    // Clear cache
     this.cache.clear(userId);
 
-    // Store logout timestamp to prevent re-authentication with old JWTs
-    // This addresses the JWT limitation: JWTs cannot be revoked, but we can track
-    // when a user logged out and reject tokens issued before that time
     const now = new Date();
     const expiresAt = new Date(now.getTime() + this.logoutTtlMs);
 
+    // Logout record is keyed by userId (per-user, not per-session); used for token revocation check
     const logoutRef = this.firestore.collection(this.logoutsCollectionName).doc(userId);
     await logoutRef.set(
       this.toLogoutDocument({
@@ -240,22 +249,28 @@ export class SessionService {
       }),
     );
 
-    // Delete session document from Firestore
-    const docRef = this.firestore.collection(this.collectionName).doc(userId);
-    await docRef.delete();
+    // Sessions are stored as user_sessions/{sessionId}; query by userId and delete each document
+    const snapshot = await this.firestore
+      .collection(this.collectionName)
+      .where('userId', '==', userId)
+      .get();
+    for (const doc of snapshot.docs) {
+      await doc.ref.delete();
+    }
   }
 
   /**
-   * Check if JWT token was issued before logout
-   * Returns true if token was issued before logout timestamp
+   * Check if the JWT was issued before the user's last logout.
+   * Logout records are stored at user_logouts/{userId} (one per user). We use this to reject
+   * tokens that were issued before logout, since JWTs cannot be revoked directly.
+   * Returns true if token was issued before logout (token should be rejected).
    */
   async wasTokenIssuedBeforeLogout(userId: string, tokenIssuedAt: Date): Promise<boolean> {
-    // Check logout timestamp
     const logoutRef = this.firestore.collection(this.logoutsCollectionName).doc(userId);
     const doc = await logoutRef.get();
 
     if (!doc.exists) {
-      return false; // No logout recorded - token is valid
+      return false; // No logout recorded — token is acceptable
     }
 
     const data = doc.data() as FirestoreLogoutDocument;
@@ -263,43 +278,35 @@ export class SessionService {
       return false;
     }
 
-    // Parse logout document
     const logoutInfo = this.parseLogoutDocument(data);
-
-    // Check if token was issued BEFORE logout
     return tokenIssuedAt < logoutInfo.loggedOutAt;
   }
 
   /**
-   * Warmup cache from Firestore
-   * Loads all active sessions into cache on startup
-   * Also cleans up expired sessions (lazy deletion)
+   * Warmup cache from Firestore on startup. Loads all non-expired sessions into the in-memory
+   * cache (keyed by userId). Document IDs in user_sessions are sessionIds; we cache by userId
+   * for lookup. Also performs lazy deletion of expired session documents.
    */
   async warmupCache(): Promise<void> {
     const collection = this.firestore.collection(this.collectionName);
     const now = new Date();
 
-    // Query active sessions
     const snapshot = await collection.where('expiresAt', '>', now).get();
 
-    // Load into cache
     for (const doc of snapshot.docs) {
       const data = doc.data() as FirestoreSessionDocument;
-
-      // SECURITY: Verify session userId matches document ID (data integrity check)
-      // Skip sessions with mismatched userId (data corruption)
-      if (data.userId !== doc.id) {
+      // Document ID must match sessionId in payload (data integrity)
+      if (data.sessionId !== doc.id) {
         console.warn(
-          `Skipping session with mismatched userId: document ID=${doc.id}, data.userId=${data.userId}`,
+          `Skipping session with mismatched sessionId: document ID=${doc.id}, data.sessionId=${data.sessionId}`,
         );
         continue;
       }
-
       const session = this.parseFirestoreDocument(data);
       this.cache.set(session.userId, session);
     }
 
-    // Cleanup expired sessions (lazy deletion)
+    // Lazy cleanup: delete expired session documents in batches
     const expiredSnapshot = await collection.where('expiresAt', '<=', now).get();
 
     if (expiredSnapshot.empty) {
@@ -329,10 +336,11 @@ export class SessionService {
   }
 
   /**
-   * Parse Firestore document data into SessionInfo
+   * Parse Firestore session document (timestamp fields may be Firestore Timestamp or Date) into SessionInfo.
    */
   private parseFirestoreDocument(data: FirestoreSessionDocument): SessionInfo {
     return {
+      sessionId: data.sessionId,
       userId: data.userId,
       createdAt: this.toDate(data.createdAt),
       lastActivityAt: this.toDate(data.lastActivityAt),
@@ -341,10 +349,11 @@ export class SessionService {
   }
 
   /**
-   * Convert SessionInfo to Firestore document format
+   * Convert SessionInfo to Firestore document format for user_sessions collection.
    */
   private toFirestoreDocument(session: SessionInfo): FirestoreSessionDocument {
     return {
+      sessionId: session.sessionId,
       userId: session.userId,
       createdAt: session.createdAt,
       lastActivityAt: session.lastActivityAt,
@@ -353,7 +362,7 @@ export class SessionService {
   }
 
   /**
-   * Convert Firestore Timestamp to JavaScript Date
+   * Normalize Firestore Timestamp or Date to JavaScript Date.
    */
   private toDate(timestamp: Timestamp | FirestoreTimestamp | Date): Date {
     if (timestamp instanceof Date) {
@@ -363,7 +372,7 @@ export class SessionService {
   }
 
   /**
-   * Parse Firestore logout document data
+   * Parse Firestore logout document (user_logouts collection) into typed fields.
    */
   private parseLogoutDocument(data: FirestoreLogoutDocument): {
     userId: string;
@@ -378,7 +387,7 @@ export class SessionService {
   }
 
   /**
-   * Convert logout info to Firestore document format
+   * Convert logout info to Firestore document format for user_logouts collection.
    */
   private toLogoutDocument(logoutInfo: {
     userId: string;
