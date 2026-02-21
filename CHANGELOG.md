@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [0.3.0](https://github.com/HOBT0R/rapidraptor.auth/compare/v0.2.5...v0.3.0) (2026-02-21)
+
+
+### Bug Fixes
+
+* **auth:** use sessionId as Firestore doc ID to fix logout/re-login ([c1d78d9](https://github.com/HOBT0R/rapidraptor.auth/commit/c1d78d94e7a8c04351b7fe880b617adb14e092bc))
+
 ### [0.2.5](https://github.com/HOBT0R/rapidraptor.auth/compare/v0.2.2...v0.2.5) (2026-01-17)
 
 ### [0.2.4](https://github.com/HOBT0R/rapidraptor.auth/compare/v0.2.3...v0.2.4) (2026-01-17)
