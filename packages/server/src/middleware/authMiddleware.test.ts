@@ -369,9 +369,12 @@ describe('createAuthMiddleware', () => {
 
     it('should return 401 with SESSION_EXPIRED when session is expired', async () => {
       vi.spyOn(sessionService, 'validateSession').mockResolvedValue(SessionValidationStatus.EXPIRED);
+      vi.spyOn(sessionService, 'clearSession').mockResolvedValue(undefined);
 
       await authMiddleware(mockRequest as Request, mockResponse as Response, mockNext);
 
+      expect(sessionService.clearSession).toHaveBeenCalledTimes(1);
+      expect(sessionService.clearSession).toHaveBeenCalledWith('user123');
       expect(mockResponse.status).toHaveBeenCalledWith(401);
       expect(mockResponse.json).toHaveBeenCalledWith({
         error: {

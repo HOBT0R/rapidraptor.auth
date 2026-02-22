@@ -174,12 +174,22 @@ export function createAuthMiddleware(
         });
         // Continue to attach user and proceed
       } else if (validationStatus === SessionValidationStatus.EXPIRED) {
-        // Session expired - reject the request
         requestLogger?.warn?.('Session expired', {
           event: 'session_expired',
           userId: user.sub,
           correlationId: req.correlationId,
         });
+
+        try {
+          await sessionService.clearSession(user.sub);
+        } catch (error: unknown) {
+          requestLogger?.error?.('Failed to clear expired session', {
+            event: 'clear_session_failed',
+            error: error instanceof Error ? error.message : 'Unknown error',
+            userId: user.sub,
+            correlationId: req.correlationId,
+          });
+        }
 
         res.status(401).json({
           error: {
