@@ -172,6 +172,26 @@ describe('Auth Integration Tests', () => {
   });
 
   /**
+   * Test: Exactly one session document when creating a new session (Bug 1 guard)
+   *
+   * Validates that a single first authenticated request results in exactly one
+   * session document in Firestore for that user (no duplicate session creation).
+   */
+  it('should create exactly one session document when creating a new session', async () => {
+    const token = await getAuthToken(testUser!.email, 'password123');
+
+    await request(app).get('/test').set('Authorization', `Bearer ${token}`).expect(200);
+
+    await firestoreSync.batchSync();
+
+    const sessions = await querySessionDocsByUserId(
+      testConfig.firestoreCollectionName,
+      testUser!.uid,
+    );
+    expect(sessions.length).toBe(1);
+  });
+
+  /**
    * Test 2: Create New User Session
    *
    * Scenario: User makes their first API request after login
@@ -430,6 +450,46 @@ describe('Auth Integration Tests', () => {
     expect(response.body.error).toHaveProperty('requiresLogout', true);
     expect(response.body.error).toHaveProperty('sessionExpired', true);
     expect(response.body.error.message).toContain('expired');
+  });
+
+  /**
+   * Test: Expired session → user logged off → sessions deleted and re-login possible (Bug 2 guard)
+   *
+   * When an expired session is detected and the user is logged off (401 with sessionExpired),
+   * the user's session documents should be removed and the user should be able to log on again.
+   */
+  it('when session is expired and user is logged off should delete sessions and allow re-login', async () => {
+    const token = await getAuthToken(testUser!.email, 'password123');
+
+    await request(app).get('/test').set('Authorization', `Bearer ${token}`).expect(200);
+
+    await waitForSessionExpiration(
+      testUser!.uid,
+      testConfig.firestoreCollectionName,
+      500,
+      testConfig.inactivityTimeoutMs + 5000,
+    );
+
+    const response = await request(app)
+      .get('/test')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(401);
+
+    expect(response.body.error).toHaveProperty('code', ERROR_CODES.SESSION_EXPIRED);
+    expect(response.body.error).toHaveProperty('sessionExpired', true);
+    expect(response.body.error).toHaveProperty('requiresLogout', true);
+
+    const sessionsAfterExpiration = await querySessionDocsByUserId(
+      testConfig.firestoreCollectionName,
+      testUser!.uid,
+    );
+    expect(sessionsAfterExpiration.length).toBe(0);
+
+    const newToken = await getAuthTokenAfterSignOut(testUser!.email, 'password123');
+    await request(app)
+      .get('/test')
+      .set('Authorization', `Bearer ${newToken}`)
+      .expect(200);
   });
 
   /**
